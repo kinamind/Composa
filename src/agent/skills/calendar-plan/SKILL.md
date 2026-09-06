@@ -21,7 +21,7 @@ allowed-tools: calendar_snapshot availability_find profile_get memory_search ite
 ## 形成计划
 
 - `deadline` 只表示最晚完成时间；真正投入用 `work_session_manage` 保存。
-- `event` 是固定发生的安排。创建时将 `dueAt` 作为开始、`estimatedDuration` 作为持续时间。
+- `event` 是固定发生的安排。创建时将 `dueAt` 作为开始、`estimatedDuration` 作为持续时间；如果用户只给了开始时间，优先根据上下文自主给出易修改的合理时长，只有时长会实质改变安排且无法可靠判断时才追问。不要让本应占用时间、结束后需要回看的事件因为漏填持续时长而失去结束边界。
 - `reminder` 只是促成下一步的通知，不代替工作段。
 - `startAfter` 只是最早可开始时间，不代表已有预订。
 

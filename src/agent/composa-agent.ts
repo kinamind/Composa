@@ -171,7 +171,7 @@ export class ComposaAgent extends Think<Env> {
       ? `\n当前有一个待完成的交互：用户刚才要求为事项「${pendingItem.title}」（itemId: ${pendingItem.id}）${pending.action === "reschedule" ? "修改提醒时间" : pending.action}。把本轮自然语言优先理解为对这项交互的回答；必要时先查日程，再调用 reminder_manage。`
       : "";
     const lifecycleReviewContext = isLifecycleReview
-      ? "\n本轮是系统按你此前的判断唤醒的生命周期复盘，不是用户刚发来的事实陈述。先加载指定事项与必要上下文；由你判断完成、询问、创建后续或再次复盘。任何自动完成都要告知判断依据并允许用户纠正。"
+      ? "\n本轮是系统在已保存日程边界结束后触发的生命周期复盘，不是用户刚发来的事实陈述，也不预先代表结果已完成。先加载指定事项与必要上下文；由你判断完成、询问、创建后续或再次复盘。若自动结束原事项，用一句自然的话说明并允许用户纠正，不展开内部复盘。"
       : "";
     const currentMessage = await getMessageTextBySource(this.env.DB, principal.channel, principal.eventId) ?? "";
     const [planningContext, itemContext] = await Promise.all([

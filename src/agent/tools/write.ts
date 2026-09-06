@@ -1,6 +1,6 @@
 import { action } from "@cloudflare/think";
 import { z } from "zod";
-import { CHRONOTYPES, ITEM_TYPES, PRIORITIES, type UserProfileUpdate } from "../../core/types";
+import { CHRONOTYPES, ITEM_TYPES, PRIORITIES, type Item, type UserProfileUpdate, type WorkSession } from "../../core/types";
 import { scheduleReminder } from "../../core/reminder-service";
 import {
   archiveItem,
@@ -16,10 +16,20 @@ import { cancelOpenReminders } from "../../db/reminders";
 import { listScheduleWindows } from "../../db/schedule";
 import { clearPendingAction } from "../../db/pending-actions";
 import { ensureUserProfile, isValidTimezone, updateUserProfile } from "../../db/user-profiles";
-import { cancelOpenWorkSessions, replaceWorkSessionPlans, replaceWorkSessions } from "../../db/work-sessions";
+import {
+  cancelOpenWorkSessions,
+  listOwnedWorkSessions,
+  replaceWorkSessionPlans,
+  replaceWorkSessions,
+} from "../../db/work-sessions";
 import { getConfig } from "../../config";
 import type { AgentPrincipal } from "../context";
-import type { LifecycleFollowupController } from "../followups";
+import {
+  deriveItemLifecycleReview,
+  deriveWorkSessionLifecycleReview,
+  type DerivedLifecycleReview,
+  type LifecycleFollowupController,
+} from "../followups";
 import { stableFingerprint } from "../idempotency";
 
 type PrincipalProvider = () => AgentPrincipal;
@@ -158,15 +168,49 @@ export const calendarReplanInputSchema = z.object({
   }
 });
 
+async function synchronizeLifecycleReview(
+  item: Item,
+  followups: LifecycleFollowupController,
+  sessions: Array<Pick<WorkSession, "endAt" | "status">>,
+) {
+  const now = Date.now();
+  const candidates = [
+    deriveItemLifecycleReview(item),
+    deriveWorkSessionLifecycleReview(item, sessions),
+  ].filter((candidate): candidate is DerivedLifecycleReview => (
+    candidate !== null && Date.parse(candidate.payload.reviewAt) > now
+  ));
+  const selected = candidates.reduce<DerivedLifecycleReview | null>((latest, candidate) => (
+    !latest || Date.parse(candidate.payload.reviewAt) > Date.parse(latest.payload.reviewAt) ? candidate : latest
+  ), null);
+  if (!selected) {
+    const result = await followups.cancel(item.id);
+    return { scheduled: false as const, canceled: result.canceled };
+  }
+  const result = await followups.set(selected.payload);
+  return { ...result, basis: selected.basis };
+}
+
 export async function createOwnedItem(
   env: Env,
   principal: AgentPrincipal,
   input: z.infer<typeof createItemSchema>,
+  followups?: LifecycleFollowupController,
 ) {
   const existing = await getItemBySource(env.DB, principal.channel, principal.eventId, input.actionIndex);
   if (existing) {
     if (existing.sourceUserId !== principal.userId) throw new Error("Source event is already owned by another user");
-    return { created: false, itemId: existing.id, title: existing.title, status: existing.status };
+    const review = deriveItemLifecycleReview(existing);
+    const lifecycleReview = followups && review && Date.parse(review.payload.reviewAt) > Date.now()
+      ? { ...(await followups.set(review.payload)), basis: review.basis }
+      : null;
+    return {
+      created: false,
+      itemId: existing.id,
+      title: existing.title,
+      status: existing.status,
+      ...(lifecycleReview ? { lifecycleReview } : {}),
+    };
   }
   const item = await createItem(env.DB, {
     type: input.type,
@@ -189,13 +233,24 @@ export async function createOwnedItem(
     aiEnrichment: input.structuredData ?? {},
     metadata: { agentRuntime: "composa-v2" },
   });
-  return { created: true, itemId: item.id, title: item.title, status: item.status };
+  const review = deriveItemLifecycleReview(item);
+  const lifecycleReview = followups && review && Date.parse(review.payload.reviewAt) > Date.now()
+    ? { ...(await followups.set(review.payload)), basis: review.basis }
+    : null;
+  return {
+    created: true,
+    itemId: item.id,
+    title: item.title,
+    status: item.status,
+    ...(lifecycleReview ? { lifecycleReview } : {}),
+  };
 }
 
 export async function updateOwnedItem(
   env: Env,
   principal: AgentPrincipal,
   input: z.infer<typeof updateItemSchema>,
+  followups?: LifecycleFollowupController,
 ) {
   const current = await getOwnedItem(env.DB, input.itemId, principal.channel, principal.userId);
   if (!current) throw new Error("Item not found in the current user's memory");
@@ -224,7 +279,19 @@ export async function updateOwnedItem(
       { ...(input.primaryUrl ? { primaryUrl: input.primaryUrl } : {}) },
     );
   }
-  return { updated: changed || Boolean(input.structuredData || input.provenance || input.primaryUrl), itemId: current.id };
+  const updated = changed || Boolean(input.structuredData || input.provenance || input.primaryUrl);
+  const changesLifecycleBoundary = input.dueAt !== undefined
+    || input.estimatedDuration !== undefined
+    || input.temporalRole !== undefined;
+  if (!followups || !changesLifecycleBoundary) return { updated, itemId: current.id };
+  const canonical = await getOwnedItem(env.DB, current.id, principal.channel, principal.userId);
+  if (!canonical) throw new Error("Updated item was not found in the current user's memory");
+  const sessions = await listOwnedWorkSessions(env.DB, canonical.id, principal.channel, principal.userId);
+  return {
+    updated,
+    itemId: current.id,
+    lifecycleReview: await synchronizeLifecycleReview(canonical, followups, sessions),
+  };
 }
 
 export async function transitionOwnedItem(
@@ -243,6 +310,11 @@ export async function transitionOwnedItem(
     await cancelOpenReminders(env.DB, current.id);
     await cancelOpenWorkSessions(env.DB, current.id);
     await followups?.cancel(current.id);
+  } else if (followups) {
+    const restored = await getOwnedItem(env.DB, current.id, principal.channel, principal.userId);
+    if (!restored) throw new Error("Restored item was not found in the current user's memory");
+    const sessions = await listOwnedWorkSessions(env.DB, restored.id, principal.channel, principal.userId);
+    await synchronizeLifecycleReview(restored, followups, sessions);
   }
   return {
     changed,
@@ -255,11 +327,16 @@ export async function manageOwnedWorkSessions(
   env: Env,
   principal: AgentPrincipal,
   input: z.infer<typeof workSessionInputSchema>,
+  followups?: LifecycleFollowupController,
 ) {
   const item = await getOwnedItem(env.DB, input.itemId, principal.channel, principal.userId);
   if (!item) throw new Error("Item not found in the current user's memory");
   if (input.operation === "cancel") {
-    return { canceled: await cancelOpenWorkSessions(env.DB, item.id), itemId: item.id };
+    const canceled = await cancelOpenWorkSessions(env.DB, item.id);
+    const lifecycleReview = followups
+      ? await synchronizeLifecycleReview(item, followups, [])
+      : undefined;
+    return { canceled, itemId: item.id, ...(lifecycleReview ? { lifecycleReview } : {}) };
   }
   if (!input.sessions?.length || !input.rationale) throw new Error("Work sessions and rationale are required");
 
@@ -307,6 +384,9 @@ export async function manageOwnedWorkSessions(
   );
   const totalMinutes = Math.round(sessions.reduce((total, session) => total + session.endMs - session.startMs, 0) / 60_000);
   const dueAt = item.dueAt;
+  const lifecycleReview = followups
+    ? await synchronizeLifecycleReview(item, followups, saved)
+    : undefined;
   return {
     scheduled: true,
     itemId: item.id,
@@ -317,6 +397,7 @@ export async function manageOwnedWorkSessions(
     deadlineWarnings: dueAt
       ? saved.filter((session) => session.endAt > dueAt).map((session) => session.id)
       : [],
+    ...(lifecycleReview ? { lifecycleReview } : {}),
   };
 }
 
@@ -324,6 +405,7 @@ export async function replanOwnedWorkSessions(
   env: Env,
   principal: AgentPrincipal,
   input: z.infer<typeof calendarReplanInputSchema>,
+  followups?: LifecycleFollowupController,
 ) {
   const items = await Promise.all(input.plans.map((plan) => getOwnedItem(
     env.DB,
@@ -384,11 +466,22 @@ export async function replanOwnedWorkSessions(
       ...(label ? { label } : {}),
     })),
   })), input.rationale);
+  const lifecycleReviews = followups
+    ? await Promise.all((items as Item[]).map(async (item) => ({
+      itemId: item.id,
+      result: await synchronizeLifecycleReview(
+        item,
+        followups,
+        saved.filter((session) => session.itemId === item.id),
+      ),
+    })))
+    : undefined;
   return {
     scheduled: true,
     planCount: input.plans.length,
     sessionCount: saved.length,
     sessions: saved,
+    ...(lifecycleReviews ? { lifecycleReviews } : {}),
   };
 }
 
@@ -520,18 +613,18 @@ export function createWriteActions(
 ) {
   return {
     item_create: action({
-      description: "Create a new saved item only when the user is introducing a genuinely new task, note, resource, idea, or project. Do not use this for a reference to an existing item; search and update instead. Set temporalRole=deadline when dueAt is a latest-completion deadline, event when dueAt is the start of a fixed occurrence that occupies estimatedDuration, and none when dueAt has no schedule meaning. Use distinct actionIndex values only when one message explicitly creates several items.",
+      description: "Create a new saved item only when the user is introducing a genuinely new task, note, resource, idea, or project. Do not use this for a reference to an existing item; search and update instead. Set temporalRole=deadline when dueAt is a latest-completion deadline, event when dueAt is the start of a fixed occurrence that occupies estimatedDuration, and none when dueAt has no schedule meaning. A bounded event automatically receives an Agent lifecycle review at its expected end, so provide a contextually inferred estimatedDuration whenever the event has an inferable end; ask only when that inference would materially change the plan. Use distinct actionIndex values only when one message explicitly creates several items.",
       inputSchema: createItemSchema,
       permissions: ["items:write"],
       idempotencyKey: ({ input }) => `create:${principal().eventId}:${input.actionIndex}`,
-      execute: (input) => createOwnedItem(env, principal(), input),
+      execute: (input) => createOwnedItem(env, principal(), input, followups),
     }),
     item_update: action({
       description: "Update one existing owned item. Use after memory_search/item_get and the appropriate link reader. Put extracted facts in structuredData and source URLs in provenance so the same record becomes useful instead of storing a bare link. When a raw capture has been fully organized, set status=open; keep status=raw when important source content remains unread.",
       inputSchema: updateItemSchema,
       permissions: ["items:write"],
       idempotencyKey: ({ input }) => `update:${principal().eventId}:${input.itemId}:${stableFingerprint(input)}`,
-      execute: (input) => updateOwnedItem(env, principal(), input),
+      execute: (input) => updateOwnedItem(env, principal(), input, followups),
     }),
     item_transition: action({
       description: "Change an existing item's lifecycle: complete it, abandon/archive it, or restore it. Search first when the user refers to it conversationally.",
@@ -548,21 +641,21 @@ export function createWriteActions(
       execute: (input) => manageOwnedReminder(env, principal(), input),
     }),
     work_session_manage: action({
-      description: "Replace or cancel concrete work sessions for one existing item. The model chooses the number, duration, and timestamps from the user's actual calendar, deadline, effort, chronotype, preferences, and current reality; code does not apply a category template. Call calendar_snapshot and, when looking for a duration, availability_find for an explicit relevant range first. Split substantial work when the evidence supports it, without imposing a fixed session count. startAfter is only an earliest-start constraint and does not reserve time. Work sessions cannot physically overlap; use calendar_replan when several flexible items must move together.",
+      description: "Replace or cancel concrete work sessions for one existing item. The model chooses the number, duration, and timestamps from the user's actual calendar, deadline, effort, chronotype, preferences, and current reality; code does not apply a category template. Call calendar_snapshot and, when looking for a duration, availability_find for an explicit relevant range first. Split substantial work when the evidence supports it, without imposing a fixed session count. startAfter is only an earliest-start constraint and does not reserve time. Work sessions cannot physically overlap; use calendar_replan when several flexible items must move together. Saving the plan automatically schedules an Agent lifecycle review after its final session; the review does not assume the work is complete.",
       inputSchema: workSessionInputSchema,
       permissions: ["schedule:write"],
       idempotencyKey: ({ input }) => `work-sessions:${principal().eventId}:${input.itemId}:${stableFingerprint(input)}`,
-      execute: (input) => manageOwnedWorkSessions(env, principal(), input),
+      execute: (input) => manageOwnedWorkSessions(env, principal(), input, followups),
     }),
     calendar_replan: action({
       description: "Atomically replace the concrete work sessions of several existing items when the user's current reality or priorities make the old plan stale. Load the affected items and calendar first, then submit the complete coupled change once. Fixed events, deadlines, reminders, and unrelated work sessions are never moved by this action. The model decides what should move; code only verifies ownership, valid future intervals, and physical non-overlap.",
       inputSchema: calendarReplanInputSchema,
       permissions: ["schedule:write"],
       idempotencyKey: ({ input }) => `calendar-replan:${principal().eventId}:${stableFingerprint(input)}`,
-      execute: (input) => replanOwnedWorkSessions(env, principal(), input),
+      execute: (input) => replanOwnedWorkSessions(env, principal(), input, followups),
     }),
     lifecycle_followup_manage: action({
-      description: "Set or cancel an Agent-owned lifecycle review for an existing time-bound item. You decide from this item's context whether a review is useful and when it should run. At review time the Agent will judge whether to complete, ask, create follow-on work, or review later; setting this never means the item will automatically complete. Use an item-specific reason, not a category rule.",
+      description: "Set or cancel an additional Agent-owned lifecycle review for an existing item when current judgment calls for a later checkpoint. Bounded events and saved work plans already receive reliable reviews at their end boundaries; use this action to re-check uncertainty or a semantic boundary that is not represented by those schedules. At review time the Agent will judge whether to complete, ask, create follow-on work, or review later; setting this never means the item will automatically complete. Use an item-specific reason, not a category rule.",
       inputSchema: lifecycleFollowupInputSchema,
       permissions: ["followups:write"],
       idempotencyKey: ({ input }) => `followup:${principal().eventId}:${input.itemId}:${stableFingerprint(input)}`,
