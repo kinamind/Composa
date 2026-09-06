@@ -81,6 +81,8 @@ describe("attention-aware foreground presentation", () => {
     expect(directorMessages[0]?.content).toContain("明确要求盘点、审计、历史或完整清单");
     expect(directorMessages[0]?.content).toContain("不要用固定条数");
     expect(directorMessages[0]?.content).toContain("只说变化量");
+    expect(directorMessages[0]?.content).toContain("系统触发的生命周期回合");
+    expect(directorMessages[0]?.content).toContain("一个会改变下一步安排的轻量问题");
     expect(directorMessages[0]?.content).toContain("联系方式");
     expect(directorMessages[0]?.content).toContain("延后不等于值得展示");
     expect(directorMessages[0]?.content).toContain("不要在用户已经过载时集中抛给用户确认");

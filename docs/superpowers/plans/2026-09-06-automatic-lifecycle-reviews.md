@@ -1,0 +1,70 @@
+# Automatic Lifecycle Reviews Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Ensure every bounded calendar event and planned work period reliably wakes Desk-IX after its expected end so the Agent can decide, from context, whether to complete it, continue tracking it, create follow-on work, or ask the user one lightweight question.
+
+**Architecture:** Keep lifecycle judgment inside the Agent and move only wake-up reliability into infrastructure. Write actions derive a review boundary from structured calendar state, synchronize one durable alarm per item, and cancel or replace that alarm when the plan changes. The existing Durable Object callback re-enters the normal Agent loop with current memory and calendar context; it does not decide completion itself.
+
+**Tech Stack:** TypeScript, Cloudflare Workers Agents SDK, Durable Objects scheduling, D1, Zod, Vitest.
+
+---
+
+### Task 1: Specify boundary derivation as a pure domain operation
+
+**Files:**
+- Modify: `src/agent/followups.ts`
+- Test: `test/agent-followups.test.ts`
+
+- [x] Add failing tests for a bounded event, an unbounded event, an ordinary task, and a planned work-session series.
+- [x] Add `deriveItemLifecycleReview` and `deriveWorkSessionLifecycleReview` helpers. A bounded event reviews at `dueAt + estimatedDuration`; a work plan reviews at the end of its latest session. Return `null` when no meaningful end exists.
+- [x] Keep the generated payload factual: include the item, owner/channel, review time, and the boundary that ended. Do not infer completion or encode event-category keywords.
+- [x] Run `npm test -- test/agent-followups.test.ts` and confirm all cases pass.
+
+### Task 2: Synchronize reviews whenever an item is created or changed
+
+**Files:**
+- Modify: `src/agent/tools/write.ts`
+- Test: `test/agent-tools-write.test.ts`
+
+- [x] Add failing tests proving that creating a bounded event schedules its end review, changing its time replaces the review, removing its event boundary cancels the review, and completing/archiving still cancels it.
+- [x] Pass the existing `LifecycleFollowupController` into create and update actions.
+- [x] After a successful item write, reload the canonical item and call one synchronization helper: `set` for a future derived boundary, `cancel` otherwise.
+- [x] Return the persisted item plus lifecycle scheduling metadata to the Agent so the reply can be accurate without exposing internal IDs.
+- [x] Run `npm test -- test/agent-tools-write.test.ts` and confirm all cases pass.
+
+### Task 3: Cover planned work periods and replanning
+
+**Files:**
+- Modify: `src/agent/tools/write.ts`
+- Test: `test/agent-tools-write.test.ts`
+
+- [x] Add failing tests proving that saving sessions schedules one review after the final session, replanning replaces it, and cancelling the plan removes it or restores the item's bounded-event review when applicable.
+- [x] Synchronize the lifecycle alarm only after the work-session transaction succeeds. Reuse the same deterministic item-level alarm rather than creating one alarm per session.
+- [x] Preserve idempotency: retrying the same write must converge on the same review time and callback event ID.
+- [x] Run focused write-action tests.
+
+### Task 4: Make the Agent's lifecycle contract explicit without hard-coded outcomes
+
+**Files:**
+- Modify: `src/agent/followups.ts`
+- Modify: `src/agent/prompt.ts`
+- Modify: `src/agent/skills/calendar-review/SKILL.md`
+- Test: `test/agent-followups.test.ts`
+- Test: `test/agent-calendar-skills.test.ts`
+
+- [x] State that the infrastructure wake-up is guaranteed but its outcome is not predetermined.
+- [x] Tell the Agent to separate occurrence certainty from outcome certainty, use current conversation/context, complete silently obvious event-state transitions with a compact report, and ask only when uncertainty changes future planning.
+- [x] Add assertions that prohibit category tables, keyword-based completion, and verbose retrospective summaries.
+- [x] Run the focused prompt and skill tests.
+
+### Task 5: Verify, deploy, and merge
+
+**Files:**
+- Modify only if validation identifies a concrete defect.
+
+- [x] Run `npm run check`, `npm run lint`, the full test suite, and the Worker dry run.
+- [x] Review the diff for accidental limits, fixed scenario mappings, stale-alarm paths, secret exposure, and unbounded async work.
+- [ ] Commit and push `codex/automatic-lifecycle-reviews`, create a PR, wait for CI, and merge it.
+- [ ] Deploy the merged Worker and verify `/health` plus the deployed version without creating synthetic user-facing messages.
+- [ ] Confirm production remains quiet for historical records; only newly created or materially replanned boundaries receive automatic lifecycle reviews.

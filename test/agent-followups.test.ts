@@ -4,6 +4,8 @@ import type { Schedule } from "agents";
 import type { AgentPrincipal } from "../src/agent/context";
 import {
   buildLifecycleReviewMessage,
+  deriveItemLifecycleReview,
+  deriveWorkSessionLifecycleReview,
   isLifecycleFollowupSchedule,
   type LifecycleFollowupController,
 } from "../src/agent/followups";
@@ -21,6 +23,75 @@ const principal: AgentPrincipal = {
 };
 
 describe("agent-owned lifecycle follow-ups", () => {
+  it("derives a review from a bounded event without deciding its outcome", async () => {
+    const meeting = await createItem(env.DB, {
+      type: "task",
+      title: "讨论研究进度",
+      content: "固定会面",
+      rawMessage: "明晚九点开会，大约一小时",
+      dueAt: "2026-09-07T13:00:00.000Z",
+      estimatedDuration: 60,
+      temporalRole: "event",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: "derived-event-review",
+    });
+
+    const review = deriveItemLifecycleReview(meeting);
+    expect(review?.basis).toBe("event_end");
+    expect(review?.payload.itemId).toBe(meeting.id);
+    expect(review?.payload.reviewAt).toBe("2026-09-07T14:00:00.000Z");
+    expect(review?.payload.reason).toContain("预设结果");
+  });
+
+  it("does not invent an end boundary for notes, deadlines, or duration-less events", async () => {
+    const note = await createItem(env.DB, {
+      type: "note",
+      title: "研究资料",
+      content: "留作参考",
+      rawMessage: "记录一下",
+      temporalRole: "none",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: "no-derived-note-review",
+    });
+    expect(deriveItemLifecycleReview(note)).toBeNull();
+    expect(deriveItemLifecycleReview({
+      ...note,
+      temporalRole: "deadline",
+      dueAt: "2026-09-07T14:00:00.000Z",
+      estimatedDuration: 60,
+    })).toBeNull();
+    expect(deriveItemLifecycleReview({
+      ...note,
+      temporalRole: "event",
+      dueAt: "2026-09-07T14:00:00.000Z",
+      estimatedDuration: null,
+    })).toBeNull();
+  });
+
+  it("reviews a work plan after its final planned session", async () => {
+    const item = await createItem(env.DB, {
+      type: "task",
+      title: "修改论文",
+      content: "分两段处理",
+      rawMessage: "安排一下",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: "derived-work-review",
+    });
+
+    const review = deriveWorkSessionLifecycleReview(item, [
+      { endAt: "2026-09-07T10:00:00.000Z", status: "planned" },
+      { endAt: "2026-09-07T12:00:00.000Z", status: "canceled" },
+      { endAt: "2026-09-08T11:30:00.000Z", status: "planned" },
+    ]);
+    expect(review?.basis).toBe("work_plan_end");
+    expect(review?.payload.itemId).toBe(item.id);
+    expect(review?.payload.reviewAt).toBe("2026-09-08T11:30:00.000Z");
+    expect(review?.payload.reason).toContain("不预设结果");
+  });
+
   it("matches only the exact callback and item payload", () => {
     const itemId = "10000000-0000-4000-8000-000000000001";
     const otherItemId = "10000000-0000-4000-8000-000000000002";
@@ -66,9 +137,12 @@ describe("agent-owned lifecycle follow-ups", () => {
     expect(prompt).toContain("不是用户声称");
     expect(prompt).toContain("发生确定性");
     expect(prompt).toContain("结果确定性");
-    expect(prompt).toContain("可以标记完成并告知");
+    expect(prompt).toContain("可以标记完成");
     expect(prompt).toContain("保持原状态并简短询问");
     expect(prompt).toContain("后续事项");
+    expect(prompt).toContain("不要展开复盘报告");
+    expect(prompt).toContain("时间边界已到");
+    expect(prompt).toContain("只报告实际状态变化");
     expect(prompt).not.toContain("会议一律完成");
   });
 

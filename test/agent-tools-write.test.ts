@@ -1,8 +1,10 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentPrincipal } from "../src/agent/context";
+import type { LifecycleFollowupController, LifecycleFollowupPayload } from "../src/agent/followups";
 import type { ReminderWorkflowPayload } from "../src/core/types";
 import {
+  createOwnedItem,
   manageOwnedReminder,
   manageOwnedWorkSessions,
   replanOwnedWorkSessions,
@@ -21,7 +23,92 @@ const principal: AgentPrincipal = {
   receivedAt: "2026-08-16T08:00:00.000Z",
 };
 
+function fakeFollowups() {
+  const set = vi.fn<LifecycleFollowupController["set"]>().mockImplementation(
+    async (payload: LifecycleFollowupPayload) => ({
+      scheduled: true,
+      scheduleId: `schedule-${Date.parse(payload.reviewAt)}`,
+      reviewAt: payload.reviewAt,
+    }),
+  );
+  const cancel = vi.fn<LifecycleFollowupController["cancel"]>().mockResolvedValue({ canceled: 1 });
+  return { controller: { set, cancel } satisfies LifecycleFollowupController, set, cancel };
+}
+
 describe("agent write capabilities", () => {
+  it("automatically schedules a review at the end of a newly created bounded event", async () => {
+    const { controller, set } = fakeFollowups();
+    const startAt = new Date(Date.now() + 365 * 24 * 60 * 60_000).toISOString();
+    const createPrincipal = {
+      ...principal,
+      eventId: "automatic-created-event-review",
+    };
+    const input = {
+      actionIndex: 0,
+      type: "task" as const,
+      title: "和同学面试",
+      content: "固定安排，预计两小时",
+      tags: [],
+      status: "open" as const,
+      priority: "normal" as const,
+      dueAt: startAt,
+      estimatedDuration: 120,
+      temporalRole: "event" as const,
+    };
+    const result = await createOwnedItem(env, createPrincipal, input, controller);
+
+    const expectedReviewAt = new Date(Date.parse(startAt) + 120 * 60_000).toISOString();
+    expect(result).toMatchObject({
+      created: true,
+      lifecycleReview: { scheduled: true, reviewAt: expectedReviewAt, basis: "event_end" },
+    });
+    const scheduled = set.mock.calls[0]?.[0];
+    expect(scheduled?.itemId).toBe(result.itemId);
+    expect(scheduled?.reviewAt).toBe(expectedReviewAt);
+    expect(scheduled?.reason).toContain("预设结果");
+
+    const retried = await createOwnedItem(env, createPrincipal, input, controller);
+    expect(retried).toMatchObject({ created: false, itemId: result.itemId });
+    expect(set.mock.calls[1]?.[0]).toMatchObject({
+      itemId: result.itemId,
+      reviewAt: expectedReviewAt,
+    });
+  });
+
+  it("replaces an event review when its boundary changes and cancels it when the boundary is removed", async () => {
+    const { controller, set, cancel } = fakeFollowups();
+    const item = await createItem(env.DB, {
+      type: "task",
+      title: "项目讨论",
+      content: "固定事件",
+      rawMessage: "明天讨论",
+      dueAt: new Date(Date.now() + 48 * 60 * 60_000).toISOString(),
+      estimatedDuration: 60,
+      temporalRole: "event",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: "updated-event-review",
+    });
+    const movedStart = new Date(Date.now() + 72 * 60 * 60_000).toISOString();
+
+    await updateOwnedItem(env, principal, {
+      itemId: item.id,
+      dueAt: movedStart,
+      estimatedDuration: 90,
+    }, controller);
+    expect(set).toHaveBeenLastCalledWith(expect.objectContaining({
+      itemId: item.id,
+      reviewAt: new Date(Date.parse(movedStart) + 90 * 60_000).toISOString(),
+    }));
+
+    await updateOwnedItem(env, principal, {
+      itemId: item.id,
+      temporalRole: "none",
+      dueAt: null,
+    }, controller);
+    expect(cancel).toHaveBeenLastCalledWith(item.id);
+  });
+
   it("updates only the authenticated user's persistent assistant profile", async () => {
     await ensureUserProfile(env.DB, principal.channel, principal.userId, {
       timezone: "Asia/Singapore",
@@ -320,6 +407,79 @@ describe("agent write capabilities", () => {
     ]);
   });
 
+  it("schedules one lifecycle review after the final planned work session and removes it with the plan", async () => {
+    const { controller, set, cancel } = fakeFollowups();
+    const base = Date.now() + 5 * 24 * 60 * 60_000;
+    const item = await createItem(env.DB, {
+      type: "task",
+      title: "准备研究汇报",
+      content: "需要分两段完成",
+      rawMessage: "安排两段时间",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: "automatic-work-plan-review",
+    });
+    const firstEnd = new Date(base + 60 * 60_000).toISOString();
+    const finalEnd = new Date(base + 4 * 60 * 60_000).toISOString();
+
+    await expect(manageOwnedWorkSessions(env, principal, {
+      operation: "replace",
+      itemId: item.id,
+      sessions: [
+        { startAt: new Date(base).toISOString(), endAt: firstEnd },
+        { startAt: new Date(base + 3 * 60 * 60_000).toISOString(), endAt: finalEnd },
+      ],
+      rationale: "按当前空档分段推进",
+    }, controller)).resolves.toMatchObject({
+      scheduled: true,
+      lifecycleReview: { scheduled: true, reviewAt: finalEnd, basis: "work_plan_end" },
+    });
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({ itemId: item.id, reviewAt: finalEnd }));
+
+    await manageOwnedWorkSessions(env, principal, {
+      operation: "cancel",
+      itemId: item.id,
+    }, controller);
+    expect(cancel).toHaveBeenLastCalledWith(item.id);
+  });
+
+  it("restores a bounded event's own review when its separate work plan is canceled", async () => {
+    const { controller, set } = fakeFollowups();
+    const base = Date.now() + 6 * 24 * 60 * 60_000;
+    const eventEnd = new Date(base + 60 * 60_000).toISOString();
+    const workEnd = new Date(base + 4 * 60 * 60_000).toISOString();
+    const item = await createItem(env.DB, {
+      type: "task",
+      title: "固定讨论与准备",
+      content: "事件之外另有准备时段",
+      rawMessage: "安排讨论和准备",
+      dueAt: new Date(base).toISOString(),
+      estimatedDuration: 60,
+      temporalRole: "event",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: "event-review-restored-after-work-cancel",
+    });
+
+    await manageOwnedWorkSessions(env, principal, {
+      operation: "replace",
+      itemId: item.id,
+      sessions: [{
+        startAt: new Date(base + 3 * 60 * 60_000).toISOString(),
+        endAt: workEnd,
+      }],
+      rationale: "讨论后整理结果",
+    }, controller);
+    expect(set).toHaveBeenLastCalledWith(expect.objectContaining({ reviewAt: workEnd }));
+
+    await manageOwnedWorkSessions(env, principal, {
+      operation: "cancel",
+      itemId: item.id,
+    }, controller);
+    expect(set).toHaveBeenLastCalledWith(expect.objectContaining({ reviewAt: eventEnd }));
+  });
+
   it("rejects internally overlapping sessions and cancels sessions at terminal lifecycle", async () => {
     const base = Date.now() + 96 * 60 * 60_000;
     const item = await createItem(env.DB, {
@@ -379,6 +539,7 @@ describe("agent write capabilities", () => {
   });
 
   it("atomically replans several flexible items when current priorities change", async () => {
+    const { controller, set } = fakeFollowups();
     const base = Date.now() + 7 * 24 * 60 * 60_000;
     const oldPriority = await createItem(env.DB, {
       type: "task",
@@ -441,9 +602,18 @@ describe("agent write capabilities", () => {
         },
       ],
       rationale: "用户当前状态和优先级变化，局部重排可移动工作段",
-    });
+    }, controller);
 
     expect(result).toMatchObject({ scheduled: true, planCount: 2, sessionCount: 2 });
+    expect(set).toHaveBeenCalledTimes(2);
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({
+      itemId: newPriority.id,
+      reviewAt: new Date(base + 60 * 60_000).toISOString(),
+    }));
+    expect(set).toHaveBeenCalledWith(expect.objectContaining({
+      itemId: oldPriority.id,
+      reviewAt: new Date(base + 2 * 60 * 60_000).toISOString(),
+    }));
     const newPrioritySessions = await listOwnedWorkSessions(env.DB, newPriority.id, principal.channel, principal.userId);
     const oldPrioritySessions = await listOwnedWorkSessions(env.DB, oldPriority.id, principal.channel, principal.userId);
     expect(newPrioritySessions.filter((session) => session.status === "planned")).toEqual([
