@@ -106,7 +106,7 @@ describe("agent write capabilities", () => {
       temporalRole: "none",
       dueAt: null,
     }, controller);
-    expect(cancel).toHaveBeenLastCalledWith(item.id);
+    expect(cancel).toHaveBeenLastCalledWith(item.id, "boundary");
   });
 
   it("updates only the authenticated user's persistent assistant profile", async () => {
@@ -441,7 +441,7 @@ describe("agent write capabilities", () => {
       operation: "cancel",
       itemId: item.id,
     }, controller);
-    expect(cancel).toHaveBeenLastCalledWith(item.id);
+    expect(cancel).toHaveBeenLastCalledWith(item.id, "boundary");
   });
 
   it("restores a bounded event's own review when its separate work plan is canceled", async () => {

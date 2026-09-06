@@ -32,6 +32,9 @@ describe("calendar skill catalog", () => {
     expect(review?.body).toContain("可靠唤醒 Agent");
     expect(review?.body).toContain("不预先决定“已经完成”");
     expect(review?.body).toContain("不能把上述判断改写成事项类别、标题关键词或固定置信度表");
+    expect(plan?.body).toContain("不建立统一提前量或固定周期");
+    expect(review?.body).toContain("进度同步是另一条独立通道");
+    expect(review?.body).toContain("不要机械沿用上一次间隔");
   });
 
   it("builds the Think skill catalog and exposes activation tools", async () => {

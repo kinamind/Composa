@@ -11,6 +11,7 @@ export const lifecycleFollowupPayloadSchema = z.object({
   userId: z.string().min(1).max(256),
   reviewAt: z.string().datetime(),
   reason: z.string().trim().min(1).max(1_000),
+  kind: z.enum(["boundary", "progress"]).optional(),
 });
 
 export type LifecycleFollowupPayload = z.infer<typeof lifecycleFollowupPayloadSchema>;
@@ -26,17 +27,23 @@ export interface LifecycleFollowupController {
     scheduleId: string;
     reviewAt: string;
   }>;
-  cancel(itemId: string): Promise<{ canceled: number }>;
+  cancel(itemId: string, kind?: "boundary" | "progress"): Promise<{ canceled: number }>;
 }
 
-export function isLifecycleFollowupSchedule(schedule: Schedule<unknown>, itemId: string): boolean {
+export function isLifecycleFollowupSchedule(
+  schedule: Schedule<unknown>,
+  itemId: string,
+  kind?: "boundary" | "progress",
+): boolean {
   if (schedule.callback !== LIFECYCLE_FOLLOWUP_CALLBACK) return false;
   const payload = lifecycleFollowupPayloadSchema.safeParse(schedule.payload);
-  return payload.success && payload.data.itemId === itemId;
+  if (!payload.success || payload.data.itemId !== itemId) return false;
+  if (!kind) return true;
+  return payload.data.kind === kind || payload.data.kind === undefined;
 }
 
 export function lifecycleReviewEventId(payload: LifecycleFollowupPayload): string {
-  return `${LIFECYCLE_REVIEW_EVENT_PREFIX}:${payload.itemId}:${Date.parse(payload.reviewAt)}`;
+  return `${LIFECYCLE_REVIEW_EVENT_PREFIX}:${payload.itemId}:${payload.kind ?? "legacy"}:${Date.parse(payload.reviewAt)}`;
 }
 
 export function deriveItemLifecycleReview(item: Item): DerivedLifecycleReview | null {
@@ -54,6 +61,7 @@ export function deriveItemLifecycleReview(item: Item): DerivedLifecycleReview | 
       userId: item.sourceUserId,
       reviewAt: reviewAt.toISOString(),
       reason: `事项保存的固定时段已到预计结束点（开始 ${item.dueAt}，持续 ${item.estimatedDuration} 分钟）；请结合当前上下文判断其生命周期，而不是预设结果。`,
+      kind: "boundary",
     },
   };
 }
@@ -78,6 +86,7 @@ export function deriveWorkSessionLifecycleReview(
       userId: item.sourceUserId,
       reviewAt,
       reason: `为该事项保存的工作计划已到最后一个时段的结束点（${reviewAt}）；请结合实际进展判断完成、继续安排或轻量确认，不预设结果。`,
+      kind: "boundary",
     },
   };
 }
@@ -87,6 +96,7 @@ export function buildLifecycleReviewMessage(
   payload: LifecycleFollowupPayload,
   now = new Date(),
 ): string {
+  const isBoundaryReview = payload.kind === "boundary";
   const compactItem = {
     id: item.id,
     type: item.type,
@@ -102,13 +112,17 @@ export function buildLifecycleReviewMessage(
     updatedAt: item.updatedAt,
   };
   return [
-    "[Desk-IX 内部事件：系统触发的生命周期复盘]",
+    `[Desk-IX 内部事件：系统触发的${isBoundaryReview ? "边界复盘" : "进度同步"}]`,
     "这不是用户声称事项已完成，也不是新的用户指令。请对下面这一项做一次独立、上下文相关的判断。",
     `触发时间：${now.toISOString()}`,
     `当初安排复盘的理由：${payload.reason}`,
     `目标事项：${JSON.stringify(compactItem)}`,
-    "先激活 calendar-review 技能并用 item_get；需要时间上下文时，用 calendar_snapshot 查看覆盖该事项的明确范围。系统已经可靠确认的是安排的时间边界已到，不是事项结果。分别判断发生确定性与结果确定性，不得按“会议”“任务”等名称套固定规则。",
-    "如果现有证据让你高度确信原事件已自然发生或结束，且原事项本身表示的就是这次发生而非某个尚未确认的产出，可以标记完成并用一句自然的话告知，允许用户纠正；不要展开复盘报告。",
+    isBoundaryReview
+      ? "先激活 calendar-review 技能并用 item_get；需要时间上下文时，用 calendar_snapshot 查看覆盖该事项的明确范围。系统已经可靠确认的是安排的时间边界已到，不是事项结果。分别判断发生确定性与结果确定性，不得按“会议”“任务”等名称套固定规则。"
+      : "先激活 calendar-review 技能并用 item_get；需要时间上下文时，用 calendar_snapshot 查看相关范围。这是 Agent 此前根据事项状态选择的进度检查点，不表示任何时间段已经发生，也不表示进度停滞。结合截止、已有投入、后续空档和最新上下文判断此刻是否需要推进、调整或询问。",
+    isBoundaryReview
+      ? "如果现有证据让你高度确信原事件已自然发生或结束，且原事项本身表示的就是这次发生而非某个尚未确认的产出，可以标记完成并用一句自然的话告知，允许用户纠正；不要展开复盘报告。"
+      : "如果现有证据足以判断进展，直接维护状态、工作计划或下一步；如果缺少的进展会改变后续规划，只问一个轻量问题。事项仍需持续承载时，根据当下风险和节奏自主安排下一次进度同步，不使用固定周期。",
     "如果是否发生、是否完成或结果仍不确定，保持原状态并简短询问用户；若此刻打扰不合适，也可以由你选择新的复盘时间。",
     "如果原事件已经结束但产生了仍需推进的后续事项，完成原事项，并按实际语义创建或更新独立的后续事项。不要把未确认的结果写成事实。",
     "用户可见回复只报告实际状态变化或提出一个确有价值的问题；不要复述事项详情、完整历史或你的内部判断过程。",
