@@ -110,6 +110,8 @@ describe("ComposaAgent runtime", () => {
     expect(DESK_IX_PERSONA).toContain("会议、材料和后续行动是不同对象");
     expect(DESK_IX_PERSONA).toContain("系统会重新唤醒你");
     expect(DESK_IX_PERSONA).toContain("不预先决定");
+    expect(DESK_IX_PERSONA).toContain("可以主动同步进度");
+    expect(DESK_IX_PERSONA).toContain("不套固定周期");
     expect(DESK_IX_PERSONA).toContain("后台认知与执行层");
     expect(DESK_IX_PERSONA).toContain("完整性属于后台状态");
     expect(DESK_IX_PERSONA).toContain("独立前台注意力层");

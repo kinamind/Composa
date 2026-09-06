@@ -65,6 +65,39 @@
 
 - [x] Run `npm run check`, `npm run lint`, the full test suite, and the Worker dry run.
 - [x] Review the diff for accidental limits, fixed scenario mappings, stale-alarm paths, secret exposure, and unbounded async work.
-- [ ] Commit and push `codex/automatic-lifecycle-reviews`, create a PR, wait for CI, and merge it.
-- [ ] Deploy the merged Worker and verify `/health` plus the deployed version without creating synthetic user-facing messages.
-- [ ] Confirm production remains quiet for historical records; only newly created or materially replanned boundaries receive automatic lifecycle reviews.
+- [x] Commit and push `codex/automatic-lifecycle-reviews`, create a PR, wait for CI, and merge it.
+- [x] Deploy the merged Worker and verify `/health` plus the deployed version without creating synthetic user-facing messages.
+- [x] Confirm production remains quiet for historical records; only newly created or materially replanned boundaries receive automatic lifecycle reviews.
+
+### Task 6: Backfill already-planned future boundaries without historical noise
+
+**Files:**
+- Modify: `src/agent/ingress.ts`
+- Modify: `src/agent/composa-agent.ts`
+- Modify: `src/agent/tools/write.ts`
+- Modify: `src/http/router.ts`
+- Test: `test/http.test.ts`
+
+- [x] Expose the existing per-user Agent session name and lifecycle synchronization operation for internal Worker use.
+- [x] Add an administrator-authenticated per-item synchronization endpoint; it derives the boundary from canonical D1 state and schedules through the owning Durable Object without sending a user message.
+- [x] Add a route test proving an existing future work plan receives a durable review at its final session end.
+- [ ] Merge and deploy the compatibility endpoint, invoke it only for current future boundaries, and leave past records untouched.
+
+### Task 7: Add independent, Agent-chosen progress synchronization
+
+**Files:**
+- Modify: `src/agent/followups.ts`
+- Modify: `src/agent/composa-agent.ts`
+- Modify: `src/agent/tools/write.ts`
+- Modify: `src/agent/prompt.ts`
+- Modify: `src/agent/skills/calendar-plan/SKILL.md`
+- Modify: `src/agent/skills/calendar-review/SKILL.md`
+- Test: `test/agent-followups.test.ts`
+- Test: `test/agent-calendar-skills.test.ts`
+- Test: `test/agent-runtime.test.ts`
+
+- [x] Separate persistent lifecycle schedules into `boundary` and `progress` lanes so one cannot replace the other; terminal transitions still cancel both.
+- [x] Keep automatic boundary derivation for fixed events and work plans, while making `lifecycle_followup_manage` the rolling progress lane.
+- [x] Instruct the Agent to choose progress checkpoints from deadline risk, effort, dependencies, actual calendar, current state, and user preferences instead of fixed intervals or lead times.
+- [x] At each progress checkpoint, let the Agent update directly when evidence is sufficient, ask only one decision-relevant question when needed, and choose the next checkpoint from fresh state.
+- [ ] Run focused and full validation, update the open PR, and deploy both lanes together.

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { ReminderWorkflowPayload } from "../src/core/types";
 import { createItem } from "../src/db/items";
 import { routeRequest } from "../src/http/router";
+import { replaceWorkSessions } from "../src/db/work-sessions";
 
 class FakeWorkflowInstance implements WorkflowInstance {
   public constructor(public id: string) {}
@@ -105,5 +106,40 @@ describe("HTTP router", () => {
     await expect(response.json()).resolves.toEqual({ ok: true, remindAt });
     expect(workflow.creates).toHaveLength(1);
     expect(workflow.creates[0]?.params?.remindAt).toBe(remindAt);
+  });
+
+  it("synchronizes a future item's lifecycle review through the protected admin route", async () => {
+    const item = await createItem(env.DB, {
+      type: "task",
+      title: "存量未来工作",
+      content: "补装生命周期复盘",
+      rawMessage: "补装生命周期复盘",
+      sourceChannel: "qq",
+      sourceUserId: "qq-user-42",
+      sourceMessageId: "admin-lifecycle-review-route",
+    });
+    const endAt = new Date(Date.now() + 48 * 60 * 60_000).toISOString();
+    await replaceWorkSessions(env.DB, item.id, [{
+      startAt: new Date(Date.now() + 47 * 60 * 60_000).toISOString(),
+      endAt,
+    }], "已有未来工作时段");
+    const ctx = createExecutionContext();
+    const response = await routeRequest(new Request(
+      `https://worker.test/api/items/${item.id}/lifecycle-review`,
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer test-admin-token" },
+      },
+    ), env, ctx);
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      lifecycleReview: {
+        scheduled: true,
+        reviewAt: endAt,
+        basis: "work_plan_end",
+      },
+    });
   });
 });

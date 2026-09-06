@@ -168,7 +168,7 @@ export const calendarReplanInputSchema = z.object({
   }
 });
 
-async function synchronizeLifecycleReview(
+export async function synchronizeLifecycleReview(
   item: Item,
   followups: LifecycleFollowupController,
   sessions: Array<Pick<WorkSession, "endAt" | "status">>,
@@ -184,7 +184,7 @@ async function synchronizeLifecycleReview(
     !latest || Date.parse(candidate.payload.reviewAt) > Date.parse(latest.payload.reviewAt) ? candidate : latest
   ), null);
   if (!selected) {
-    const result = await followups.cancel(item.id);
+    const result = await followups.cancel(item.id, "boundary");
     return { scheduled: false as const, canceled: result.canceled };
   }
   const result = await followups.set(selected.payload);
@@ -560,7 +560,7 @@ export async function manageOwnedLifecycleFollowup(
   const item = await getOwnedItem(env.DB, input.itemId, principal.channel, principal.userId);
   if (!item) throw new Error("Item not found in the current user's memory");
   if (input.operation === "cancel") {
-    const result = await followups.cancel(item.id);
+    const result = await followups.cancel(item.id, "progress");
     return { ...result, itemId: item.id };
   }
   if (!input.reviewAt || !input.reason) throw new Error("Review time and reason are required");
@@ -574,6 +574,7 @@ export async function manageOwnedLifecycleFollowup(
     userId: principal.userId,
     reviewAt: reviewAt.toISOString(),
     reason: input.reason,
+    kind: "progress",
   });
 }
 
@@ -613,7 +614,7 @@ export function createWriteActions(
 ) {
   return {
     item_create: action({
-      description: "Create a new saved item only when the user is introducing a genuinely new task, note, resource, idea, or project. Do not use this for a reference to an existing item; search and update instead. Set temporalRole=deadline when dueAt is a latest-completion deadline, event when dueAt is the start of a fixed occurrence that occupies estimatedDuration, and none when dueAt has no schedule meaning. A bounded event automatically receives an Agent lifecycle review at its expected end, so provide a contextually inferred estimatedDuration whenever the event has an inferable end; ask only when that inference would materially change the plan. Use distinct actionIndex values only when one message explicitly creates several items.",
+      description: "Create a new saved item only when the user is introducing a genuinely new task, note, resource, idea, or project. Do not use this for a reference to an existing item; search and update instead. Set temporalRole=deadline when dueAt is a latest-completion deadline, event when dueAt is the start of a fixed occurrence that occupies estimatedDuration, and none when dueAt has no schedule meaning. A bounded event automatically receives an Agent lifecycle review at its expected end, so provide a contextually inferred estimatedDuration whenever the event has an inferable end; ask only when that inference would materially change the plan. For non-fixed work that would benefit from progress synchronization, use lifecycle_followup_manage after this action to choose a context-dependent first checkpoint before replying. Use distinct actionIndex values only when one message explicitly creates several items.",
       inputSchema: createItemSchema,
       permissions: ["items:write"],
       idempotencyKey: ({ input }) => `create:${principal().eventId}:${input.actionIndex}`,
@@ -655,7 +656,7 @@ export function createWriteActions(
       execute: (input) => replanOwnedWorkSessions(env, principal(), input, followups),
     }),
     lifecycle_followup_manage: action({
-      description: "Set or cancel an additional Agent-owned lifecycle review for an existing item when current judgment calls for a later checkpoint. Bounded events and saved work plans already receive reliable reviews at their end boundaries; use this action to re-check uncertainty or a semantic boundary that is not represented by those schedules. At review time the Agent will judge whether to complete, ask, create follow-on work, or review later; setting this never means the item will automatically complete. Use an item-specific reason, not a category rule.",
+      description: "Set or cancel an Agent-owned progress review for an existing item when current judgment calls for a checkpoint. Boundary reviews for bounded events and saved work plans are maintained independently and will not be replaced by this action. Use progress reviews for non-fixed work, pre-deadline synchronization, unresolved outcomes, or another contextually meaningful check; choose the time from actual risk, effort, progress, calendar, and user preferences rather than a fixed interval. At review time the Agent will judge whether to update, ask one useful question, adjust plans, complete, create follow-on work, or schedule the next progress review. Use an item-specific reason, not a category rule.",
       inputSchema: lifecycleFollowupInputSchema,
       permissions: ["followups:write"],
       idempotencyKey: ({ input }) => `followup:${principal().eventId}:${input.itemId}:${stableFingerprint(input)}`,

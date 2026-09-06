@@ -7,6 +7,7 @@ import {
   deriveItemLifecycleReview,
   deriveWorkSessionLifecycleReview,
   isLifecycleFollowupSchedule,
+  lifecycleReviewEventId,
   type LifecycleFollowupController,
 } from "../src/agent/followups";
 import {
@@ -42,6 +43,7 @@ describe("agent-owned lifecycle follow-ups", () => {
     expect(review?.payload.itemId).toBe(meeting.id);
     expect(review?.payload.reviewAt).toBe("2026-09-07T14:00:00.000Z");
     expect(review?.payload.reason).toContain("预设结果");
+    expect(review?.payload.kind).toBe("boundary");
   });
 
   it("does not invent an end boundary for notes, deadlines, or duration-less events", async () => {
@@ -90,6 +92,7 @@ describe("agent-owned lifecycle follow-ups", () => {
     expect(review?.payload.itemId).toBe(item.id);
     expect(review?.payload.reviewAt).toBe("2026-09-08T11:30:00.000Z");
     expect(review?.payload.reason).toContain("不预设结果");
+    expect(review?.payload.kind).toBe("boundary");
   });
 
   it("matches only the exact callback and item payload", () => {
@@ -100,7 +103,7 @@ describe("agent-owned lifecycle follow-ups", () => {
       callback: "reviewScheduledItem",
       payload: {
         itemId,
-        channel: "qq",
+        channel: "qq" as const,
         userId: "user-1",
         reviewAt: "2026-08-17T08:00:00.000Z",
         reason: "review this item",
@@ -112,6 +115,12 @@ describe("agent-owned lifecycle follow-ups", () => {
     expect(isLifecycleFollowupSchedule(matching, otherItemId)).toBe(false);
     expect(isLifecycleFollowupSchedule({ ...matching, callback: "anotherCallback" }, itemId)).toBe(false);
     expect(isLifecycleFollowupSchedule({ ...matching, payload: "not-an-object" }, itemId)).toBe(false);
+    const boundary = { ...matching, payload: { ...matching.payload, kind: "boundary" as const } } satisfies Schedule<unknown>;
+    const progress = { ...matching, payload: { ...matching.payload, kind: "progress" as const } } satisfies Schedule<unknown>;
+    expect(isLifecycleFollowupSchedule(boundary, itemId, "boundary")).toBe(true);
+    expect(isLifecycleFollowupSchedule(boundary, itemId, "progress")).toBe(false);
+    expect(isLifecycleFollowupSchedule(progress, itemId, "progress")).toBe(true);
+    expect(lifecycleReviewEventId(boundary.payload)).not.toBe(lifecycleReviewEventId(progress.payload));
   });
 
   it("builds a review turn that leaves the decision to the Agent", async () => {
@@ -131,9 +140,10 @@ describe("agent-owned lifecycle follow-ups", () => {
       userId: principal.userId,
       reviewAt: "2026-08-17T15:00:00.000Z",
       reason: "安排结束后判断是否自然完成，或是否还有迁移跟进",
+      kind: "boundary",
     }, new Date("2026-08-17T15:00:00.000Z"));
 
-    expect(prompt).toContain("系统触发的生命周期复盘");
+    expect(prompt).toContain("系统触发的边界复盘");
     expect(prompt).toContain("不是用户声称");
     expect(prompt).toContain("发生确定性");
     expect(prompt).toContain("结果确定性");
@@ -144,6 +154,34 @@ describe("agent-owned lifecycle follow-ups", () => {
     expect(prompt).toContain("时间边界已到");
     expect(prompt).toContain("只报告实际状态变化");
     expect(prompt).not.toContain("会议一律完成");
+  });
+
+  it("builds a separate rolling progress turn without pretending a boundary ended", async () => {
+    const task = await createItem(env.DB, {
+      type: "project",
+      title: "准备申请材料",
+      content: "截止前分阶段推进",
+      rawMessage: "帮我持续跟一下",
+      temporalRole: "deadline",
+      dueAt: "2026-09-20T16:00:00.000Z",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: "rolling-progress-review",
+    });
+    const prompt = buildLifecycleReviewMessage(task, {
+      itemId: task.id,
+      channel: principal.channel,
+      userId: principal.userId,
+      reviewAt: "2026-09-12T10:00:00.000Z",
+      reason: "在截止前结合已安排投入同步一次进展",
+      kind: "progress",
+    }, new Date("2026-09-12T10:00:00.000Z"));
+
+    expect(prompt).toContain("系统触发的进度同步");
+    expect(prompt).toContain("不表示任何时间段已经发生");
+    expect(prompt).toContain("只问一个轻量问题");
+    expect(prompt).toContain("自主安排下一次进度同步");
+    expect(prompt).toContain("不使用固定周期");
   });
 
   it("verifies ownership, schedules reviews, and cancels them on terminal transitions", async () => {
@@ -177,7 +215,14 @@ describe("agent-owned lifecycle follow-ups", () => {
       userId: principal.userId,
       reviewAt,
       reason: "到点后结合上下文判断是否结束",
+      kind: "progress",
     });
+
+    await manageOwnedLifecycleFollowup(env, principal, {
+      operation: "cancel",
+      itemId: item.id,
+    }, controller);
+    expect(cancel).toHaveBeenLastCalledWith(item.id, "progress");
 
     await transitionOwnedItem(env, principal, { itemId: item.id, transition: "complete" }, controller);
     expect(cancel).toHaveBeenCalledWith(item.id);

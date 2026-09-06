@@ -1,8 +1,9 @@
 import { z } from "zod";
+import { getAgentByName } from "agents";
 import { getConfig, isAIEnabled } from "../config";
 import { getChannelAdapter } from "../channels/registry";
 import { processIncoming } from "../core/processor";
-import { submitAgentMessage } from "../agent/ingress";
+import { agentSessionName, submitAgentMessage } from "../agent/ingress";
 import { buildDailyPlan, runDailyPlan } from "../core/daily-plan";
 import { scheduleReminder } from "../core/reminder-service";
 import { localDate } from "../core/time";
@@ -126,6 +127,20 @@ export async function routeRequest(request: Request, env: Env, ctx: ExecutionCon
         if (!item) return Response.json({ error: "Not found" }, { status: 404 });
         await cancelOpenReminders(env.DB, item.id);
         return Response.json({ ok: true, canceled: true });
+      }
+
+      const lifecycleReviewMatch = path.match(/^\/api\/items\/([0-9a-f-]+)\/lifecycle-review$/i);
+      if (request.method === "POST" && lifecycleReviewMatch?.[1]) {
+        const item = await getItem(env.DB, lifecycleReviewMatch[1]);
+        if (!item) return Response.json({ error: "Not found" }, { status: 404 });
+        const name = await agentSessionName(item.sourceChannel, item.sourceUserId);
+        const agent = await getAgentByName(env.COMPOSA_AGENT, name);
+        const result = await agent.synchronizeLifecycleReviewForItem(
+          item.id,
+          item.sourceChannel,
+          item.sourceUserId,
+        );
+        return Response.json({ ok: true, lifecycleReview: result });
       }
 
       if (request.method === "POST" && path === "/api/daily-plan") {
