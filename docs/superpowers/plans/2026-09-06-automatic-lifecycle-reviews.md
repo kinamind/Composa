@@ -65,6 +65,20 @@
 
 - [x] Run `npm run check`, `npm run lint`, the full test suite, and the Worker dry run.
 - [x] Review the diff for accidental limits, fixed scenario mappings, stale-alarm paths, secret exposure, and unbounded async work.
-- [ ] Commit and push `codex/automatic-lifecycle-reviews`, create a PR, wait for CI, and merge it.
-- [ ] Deploy the merged Worker and verify `/health` plus the deployed version without creating synthetic user-facing messages.
-- [ ] Confirm production remains quiet for historical records; only newly created or materially replanned boundaries receive automatic lifecycle reviews.
+- [x] Commit and push `codex/automatic-lifecycle-reviews`, create a PR, wait for CI, and merge it.
+- [x] Deploy the merged Worker and verify `/health` plus the deployed version without creating synthetic user-facing messages.
+- [x] Confirm production remains quiet for historical records; only newly created or materially replanned boundaries receive automatic lifecycle reviews.
+
+### Task 6: Backfill already-planned future boundaries without historical noise
+
+**Files:**
+- Modify: `src/agent/ingress.ts`
+- Modify: `src/agent/composa-agent.ts`
+- Modify: `src/agent/tools/write.ts`
+- Modify: `src/http/router.ts`
+- Test: `test/http.test.ts`
+
+- [x] Expose the existing per-user Agent session name and lifecycle synchronization operation for internal Worker use.
+- [x] Add an administrator-authenticated per-item synchronization endpoint; it derives the boundary from canonical D1 state and schedules through the owning Durable Object without sending a user message.
+- [x] Add a route test proving an existing future work plan receives a durable review at its final session end.
+- [ ] Merge and deploy the compatibility endpoint, invoke it only for current future boundaries, and leave past records untouched.

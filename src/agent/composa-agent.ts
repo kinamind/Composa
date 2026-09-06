@@ -16,6 +16,7 @@ import { getOwnedItem } from "../db/items";
 import { claimMessage, failMessage, failMessageBySource, getMessageTextBySource } from "../db/messages";
 import { getPendingAction } from "../db/pending-actions";
 import { ensureUserProfile, getUserProfile } from "../db/user-profiles";
+import { listOwnedWorkSessions } from "../db/work-sessions";
 import { log } from "../observability/log";
 import { localDate } from "../core/time";
 import {
@@ -48,7 +49,7 @@ import { CALENDAR_SKILL_NAMES, calendarSkillSource } from "./skills/calendar";
 import { XIAOHONGSHU_SKILL_NAMES, xiaohongshuSkillSource } from "./skills/xiaohongshu";
 import { createCalendarTools } from "./tools/calendar";
 import { createReadTools } from "./tools/read";
-import { createWriteActions } from "./tools/write";
+import { createWriteActions, synchronizeLifecycleReview } from "./tools/write";
 import { createXiaohongshuTools } from "./tools/xiaohongshu";
 import { createMediaTools } from "./tools/media";
 import {
@@ -254,6 +255,17 @@ export class ComposaAgent extends Think<Env> {
       await failMessage(this.env.DB, claim.id, `lifecycle review submission: ${message}`);
       throw error;
     }
+  }
+
+  async synchronizeLifecycleReviewForItem(
+    itemId: string,
+    channel: LifecycleFollowupPayload["channel"],
+    userId: string,
+  ) {
+    const item = await getOwnedItem(this.env.DB, itemId, channel, userId);
+    if (!item) throw new Error("Item not found in the current user's memory");
+    const sessions = await listOwnedWorkSessions(this.env.DB, item.id, channel, userId);
+    return synchronizeLifecycleReview(item, this.lifecycleFollowupController(), sessions);
   }
 
   async receive(raw: IncomingAgentMessage): Promise<{

@@ -4,7 +4,7 @@ import { claimMessage, failMessage } from "../db/messages";
 import { saveIncomingMediaAssets } from "../db/media";
 import { log } from "../observability/log";
 
-async function sessionName(channel: IncomingMessage["channel"], userId: string): Promise<string> {
+export async function agentSessionName(channel: IncomingMessage["channel"], userId: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${channel}:${userId}`));
   const suffix = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `composa-${channel}-${suffix}`;
@@ -22,7 +22,7 @@ export async function submitAgentMessage(env: Env, incoming: IncomingMessage): P
         "[/媒体附件]",
       ].join("\n")
       : "";
-    const name = await sessionName(incoming.channel, incoming.userId);
+    const name = await agentSessionName(incoming.channel, incoming.userId);
     const agent = await getAgentByName(env.COMPOSA_AGENT, name);
     const submission = await agent.receive({
       channel: incoming.channel,

@@ -168,7 +168,7 @@ export const calendarReplanInputSchema = z.object({
   }
 });
 
-async function synchronizeLifecycleReview(
+export async function synchronizeLifecycleReview(
   item: Item,
   followups: LifecycleFollowupController,
   sessions: Array<Pick<WorkSession, "endAt" | "status">>,
