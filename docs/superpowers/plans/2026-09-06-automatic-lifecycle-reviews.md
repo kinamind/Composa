@@ -81,7 +81,7 @@
 - [x] Expose the existing per-user Agent session name and lifecycle synchronization operation for internal Worker use.
 - [x] Add an administrator-authenticated per-item synchronization endpoint; it derives the boundary from canonical D1 state and schedules through the owning Durable Object without sending a user message.
 - [x] Add a route test proving an existing future work plan receives a durable review at its final session end.
-- [ ] Merge and deploy the compatibility endpoint, invoke it only for current future boundaries, and leave past records untouched.
+- [x] Merge and deploy the compatibility endpoint. Keep its administrator authentication intact; do not rotate production credentials when the locally stored credential is rejected.
 
 ### Task 7: Add independent, Agent-chosen progress synchronization
 
@@ -100,4 +100,19 @@
 - [x] Keep automatic boundary derivation for fixed events and work plans, while making `lifecycle_followup_manage` the rolling progress lane.
 - [x] Instruct the Agent to choose progress checkpoints from deadline risk, effort, dependencies, actual calendar, current state, and user preferences instead of fixed intervals or lead times.
 - [x] At each progress checkpoint, let the Agent update directly when evidence is sufficient, ask only one decision-relevant question when needed, and choose the next checkpoint from fresh state.
-- [ ] Run focused and full validation, update the open PR, and deploy both lanes together.
+- [x] Run focused and full validation, update the open PR, and deploy both lanes together.
+
+### Task 8: Run the future-boundary backfill internally once
+
+**Files:**
+- Add: `migrations/0007_lifecycle_backfill.sql`
+- Add: `src/db/lifecycle-maintenance.ts`
+- Add: `src/core/lifecycle-backfill.ts`
+- Modify: `src/index.ts`
+- Test: `test/lifecycle-backfill.test.ts`
+
+- [x] Add a durable D1 maintenance claim with completed, failed, and stale-running recovery states.
+- [x] On the scheduled Worker trigger, claim one named backfill and find only open items whose fixed-event end or planned work-session end is still in the future.
+- [x] Synchronize each candidate through its owning Agent Durable Object without creating conversation messages, then mark the maintenance run complete.
+- [x] Prove the backfill schedules a future plan, ignores a past event, and is a no-op after successful completion.
+- [ ] Apply the migration, merge and deploy the runner, then verify the one-time run completed and the expected future schedules exist.
