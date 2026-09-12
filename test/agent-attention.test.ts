@@ -66,6 +66,11 @@ describe("attention-aware foreground presentation", () => {
         state: "output-available",
         output: { open: 18, completed: 27 },
       }],
+      verifiedEffects: [{
+        toolName: "memory_search",
+        success: true,
+        outcome: { completed: true },
+      }],
       profile,
     }, fetcher);
 
@@ -126,6 +131,8 @@ describe("attention-aware foreground presentation", () => {
     expect(ATTENTION_DIRECTOR_SYSTEM_PROMPT).toContain("不可信资料");
     expect(ATTENTION_DIRECTOR_SYSTEM_PROMPT).toContain("不能执行工具");
     expect(ATTENTION_DIRECTOR_SYSTEM_PROMPT).toContain("不得虚构");
+    expect(ATTENTION_DIRECTOR_SYSTEM_PROMPT).toContain("verifiedEffects");
+    expect(ATTENTION_DIRECTOR_SYSTEM_PROMPT).toContain("committed=true");
     expect(ATTENTION_DIRECTOR_SYSTEM_PROMPT).not.toMatch(/最多\s*[一二三四五六七八九十\d]+\s*[项条]/);
     expect(ATTENTION_RENDERER_SYSTEM_PROMPT).toContain("不增加简报中不存在的事项");
     expect(ATTENTION_RENDERER_SYSTEM_PROMPT).toContain("不得出现防御、辩解");
@@ -155,6 +162,7 @@ describe("attention-aware foreground presentation", () => {
       originalText: "还有什么工作",
       backstageDraft: "TechJam 待处理。AAAI 已完成。联系人手机号 13800000000。",
       completedTurnParts: [],
+      verifiedEffects: [],
       profile,
     }, fetcher);
 
@@ -170,6 +178,11 @@ describe("attention-aware foreground presentation", () => {
       originalText: "完成了吗",
       backstageDraft: "已完成 proposal，并取消了对应提醒。",
       completedTurnParts: [],
+      verifiedEffects: [{
+        toolName: "item_transition",
+        success: true,
+        outcome: { committed: true, changed: true, status: "completed" },
+      }],
       profile,
     };
     const result = await presentTurnReplyOrFallback(
@@ -183,6 +196,25 @@ describe("attention-aware foreground presentation", () => {
       presented: false,
     });
     expect(result.error).toBeInstanceOf(Error);
+  });
+
+  it("uses an effect-grounded fallback instead of an unverified backstage claim", async () => {
+    const result = await presentTurnReplyOrFallback(
+      { ...env, AI_API_KEY: "test-key" },
+      {
+        channel: "qq",
+        originalText: "小红书分享卡片 https://www.xiaohongshu.com/explore/test",
+        backstageDraft: "已记录。",
+        completedTurnParts: [],
+        verifiedEffects: [],
+        effectGroundedFallback: "这次没有完成读取，也没有写入记录。",
+        profile,
+      },
+      async () => { throw new Error("presenter unavailable"); },
+    );
+
+    expect(result.text).toBe("这次没有完成读取，也没有写入记录。");
+    expect(result.text).not.toContain("已记录");
   });
 
   it("keeps conversation history aligned with the reply the user actually saw", () => {

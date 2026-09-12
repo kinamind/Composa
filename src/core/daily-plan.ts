@@ -87,6 +87,7 @@ export async function buildDailyPlan(
       originalText: "这是 Desk-IX 主动生成的今日安排。只呈现今天真正值得我关注、行动或决定的内容。",
       backstageDraft: response.text,
       completedTurnParts: [{ type: "daily_plan_context", ...planningContext }],
+      verifiedEffects: [],
       profile,
     }, fetcher);
   } catch (error) {

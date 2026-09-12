@@ -31,6 +31,7 @@ allowed-tools: memory_search item_get xiaohongshu_read item_create item_update
 - `login_required`：尚未配置小红书账号会话。若用户明确要求记录，可以保留卡片可见信息，但必须标为部分记录，不能假装读过正文。
 - `session_expired`：账号会话已失效，需要在部署端刷新 `XHS_COOKIE`；不要索要账号密码，也不要让用户把会话值发进聊天。
 - `unavailable`：该账号仍无法读取，可能是帖子删除、权限或平台风控。准确报告，不补造内容。
+- `failures.errorCode` 会区分 `fetch_timeout`、`page_too_large`、`page_structure_changed`、`upstream_rate_limited` 等传输或解析问题。不要把这些问题误说成帖子没有信息，也不要默认让用户截图；结合错误性质和本轮目的自主判断是否再次读取，仍失败时只报告实际障碍。
 - 单篇正文或图片分析失败不应抹掉同批其他成功结果。
 
 本技能只读取用户明确分享的帖子，不代表已经同步主页、推荐流、收藏夹或专辑。没有执行的能力不要声称已执行。

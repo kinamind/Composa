@@ -5,6 +5,7 @@ import type { AgentPrincipal } from "../src/agent/context";
 import { XIAOHONGSHU_SKILL_NAMES, xiaohongshuSkillSource } from "../src/agent/skills/xiaohongshu";
 import { readOwnedXiaohongshuPosts } from "../src/agent/tools/xiaohongshu";
 import { createItem } from "../src/db/items";
+import { claimMessage } from "../src/db/messages";
 
 const noteId = "6a827aa90000000033019519";
 const postUrl = `https://www.xiaohongshu.com/explore/${noteId}`;
@@ -74,6 +75,45 @@ describe("Xiaohongshu Agent skill", () => {
     }, fetcher)).rejects.toThrow("current user's memory");
   });
 
+  it("rereads a saved item through its original share-card message when the canonical URL is insufficient", async () => {
+    const principal: AgentPrincipal = {
+      channel: "qq",
+      userId: "xhs-source-owner",
+      eventId: "xhs-source-reread",
+      receivedAt: "2026-09-12T10:00:00.000Z",
+    };
+    const sourceEventId = "xhs-original-card";
+    const tokenizedUrl = `${postUrl}?xsec_token=temporary-share`;
+    await claimMessage(env.DB, {
+      channel: principal.channel,
+      eventId: sourceEventId,
+      messageId: sourceEventId,
+      userId: principal.userId,
+      eventType: "message",
+      text: `QQ 小红书分享卡片 ${tokenizedUrl}`,
+      timestamp: principal.receivedAt,
+    });
+    const item = await createItem(env.DB, {
+      type: "resource",
+      title: "已整理标题",
+      content: "规范正文不重复保存分享参数",
+      rawMessage: "规范正文不重复保存分享参数",
+      url: postUrl,
+      status: "raw",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: sourceEventId,
+    });
+    const fetched: string[] = [];
+    const result = await readOwnedXiaohongshuPosts(env, principal, { itemId: item.id }, async (input) => {
+      fetched.push(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      return new Response(authenticatedPage(), { headers: { "content-type": "text/html" } });
+    });
+
+    expect(fetched).toEqual([tokenizedUrl]);
+    expect(result.posts.some((entry) => entry.result.status === "read")).toBe(true);
+  });
+
   it("returns multimodal image text to the main Agent while preserving the post read on vision failure", async () => {
     const principal: AgentPrincipal = {
       channel: "qq",
@@ -115,5 +155,30 @@ describe("Xiaohongshu Agent skill", () => {
       mediaTextStatus: "analysis_failed",
     });
     expect(JSON.stringify(degraded)).not.toContain("provider details");
+  });
+
+  it("returns a safe structured diagnostic when a post page exceeds the transport budget", async () => {
+    const principal: AgentPrincipal = {
+      channel: "qq",
+      userId: "xhs-size-owner",
+      eventId: "xhs-size-event",
+      receivedAt: "2026-09-12T10:00:00.000Z",
+    };
+    const sensitiveUrl = `${postUrl}?xsec_token=sensitive-share-token`;
+    const result = await readOwnedXiaohongshuPosts(
+      env,
+      principal,
+      { urls: [sensitiveUrl] },
+      async () => new Response("oversized", {
+        headers: { "content-type": "text/html", "content-length": "9000000" },
+      }),
+    );
+
+    expect(result.posts).toEqual([]);
+    expect(result.failures[0]).toMatchObject({
+      errorCode: "page_too_large",
+      error: "The Xiaohongshu page exceeded the configured transport budget.",
+    });
+    expect(result.failures[0]?.error).not.toContain("sensitive-share-token");
   });
 });

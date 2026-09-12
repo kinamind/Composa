@@ -4,6 +4,7 @@ import type { ChannelName, DeliveryReceipt } from "../core/types";
 import { failMessageBySource, finishMessageBySource } from "../db/messages";
 import { log } from "../observability/log";
 import type { AgentPrincipal } from "./context";
+import type { VerifiedTurnEffect } from "./effects";
 
 interface DeliveryRow extends Record<string, SqlStorageValue> {
   request_id: string;
@@ -15,6 +16,12 @@ interface DeliveryRow extends Record<string, SqlStorageValue> {
   delivery_status: "waiting" | "sending" | "sent" | "failed";
   attempts: number;
   created_at: string;
+}
+
+interface TurnEffectRow extends Record<string, SqlStorageValue> {
+  tool_name: string;
+  success: number;
+  outcome_json: string;
 }
 
 export function migrateAgentDelivery(sql: SqlStorage): void {
@@ -36,7 +43,63 @@ export function migrateAgentDelivery(sql: SqlStorage): void {
     );
     CREATE INDEX IF NOT EXISTS idx_composa_delivery_status
       ON composa_turn_origins(delivery_status, updated_at);
+    CREATE TABLE IF NOT EXISTS composa_turn_effects (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      success INTEGER NOT NULL CHECK (success IN (0, 1)),
+      outcome_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(event_id, tool_call_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_composa_turn_effects_event
+      ON composa_turn_effects(event_id, sequence);
   `);
+}
+
+export function rememberTurnEffect(
+  sql: SqlStorage,
+  eventId: string,
+  toolCallId: string,
+  effect: VerifiedTurnEffect,
+): void {
+  sql.exec(
+    `INSERT OR REPLACE INTO composa_turn_effects (
+      event_id, tool_call_id, tool_name, success, outcome_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?)`,
+    eventId,
+    toolCallId,
+    effect.toolName,
+    effect.success ? 1 : 0,
+    JSON.stringify(effect.outcome),
+    new Date().toISOString(),
+  );
+}
+
+export function listTurnEffects(sql: SqlStorage, eventId: string): VerifiedTurnEffect[] {
+  return sql.exec<TurnEffectRow>(
+    `SELECT tool_name, success, outcome_json
+     FROM composa_turn_effects
+     WHERE event_id = ?
+     ORDER BY sequence ASC`,
+    eventId,
+  ).toArray().map((row) => ({
+    toolName: row.tool_name,
+    success: row.success === 1,
+    outcome: parseEffectOutcome(row.outcome_json),
+  }));
+}
+
+function parseEffectOutcome(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 export function rememberTurnOrigin(sql: SqlStorage, requestId: string, principal: AgentPrincipal): void {

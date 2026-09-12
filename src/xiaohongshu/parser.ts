@@ -32,6 +32,7 @@ export function parseXiaohongshuPage(
       authenticated,
       noteId,
       canonicalUrl,
+      reasonCode: status,
       reason: failureReason(status),
     };
   }

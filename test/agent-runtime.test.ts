@@ -5,6 +5,7 @@ import { z } from "zod";
 import { parseTurnPrincipal, stampTurnPrincipal, type AgentPrincipal } from "../src/agent/context";
 import { DESK_IX_PERSONA } from "../src/agent/prompt";
 import type { ComposaAgent } from "../src/agent/composa-agent";
+import { listTurnEffects, rememberTurnEffect } from "../src/agent/delivery";
 import { forgetContextSchema, rememberContextSchema } from "../src/agent/tools/context-memory";
 import {
   calendarReplanInputSchema,
@@ -62,6 +63,25 @@ describe("ComposaAgent runtime", () => {
       parts: [{ type: "text", text: "更新刚才的记录" }],
     }, principal);
     expect(parseTurnPrincipal(message.metadata.turnMetadata)).toEqual(principal);
+  });
+
+  it("durably records safe tool effects for routing and foreground verification", async () => {
+    const agent = await getAgentByName(env.COMPOSA_AGENT, "qq:effect-owner");
+    const effects = await runInDurableObject(agent, (instance: ComposaAgent) => {
+      const sql = (instance as unknown as { ctx: DurableObjectState }).ctx.storage.sql;
+      rememberTurnEffect(sql, "effect-event", "tool-call-1", {
+        toolName: "item_create",
+        success: true,
+        outcome: { created: true, committed: true },
+      });
+      return listTurnEffects(sql, "effect-event");
+    });
+
+    expect(effects).toEqual([{
+      toolName: "item_create",
+      success: true,
+      outcome: { created: true, committed: true },
+    }]);
   });
 
   it("exposes an OpenAI-compatible object schema for reminder management", () => {

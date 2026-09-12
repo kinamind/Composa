@@ -35,6 +35,7 @@ export interface XiaohongshuPost extends XiaohongshuReadBase {
 
 export interface XiaohongshuReadFailure extends XiaohongshuReadBase {
   status: "login_required" | "session_expired" | "unavailable";
+  reasonCode: "login_required" | "session_expired" | "unavailable" | "page_too_large";
   reason: string;
 }
 

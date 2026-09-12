@@ -106,9 +106,9 @@ curl http://127.0.0.1:8787/health
 | `AI_TIMEOUT_MS` | `180000` | 单次 AI 网络请求的失效保护；不是 Agent 步骤上限 |
 | `AI_DAILY_PLAN_TIMEOUT_MS` | `180000` | 每日安排等后台 AI 网络请求失效保护 |
 | `AI_DAILY_REQUEST_LIMIT` | `0` | 可选日请求预算；`0` 表示不限制 |
-| `URL_FETCH_TIMEOUT_MS` | `6000` | 网页获取超时 |
+| `URL_FETCH_TIMEOUT_MS` | `20000` | 网页获取超时；等待网络响应时不占用模型推理步数 |
 | `URL_MAX_TEXT_BYTES` | `524288` | 提取后可见正文的安全边界；脚本、样式和 HTML 标记不占用 |
-| `XHS_MAX_BYTES` | `2000000` | 小红书 SSR 页面最大读取字节数 |
+| `XHS_MAX_BYTES` | `8000000` | 小红书 SSR 页面传输保护值（用于容纳多图帖的页面状态） |
 | `TELEGRAM_ALLOWED_USER_IDS` | 空 | 逗号分隔 Telegram user ID allowlist |
 | `QQ_ALLOWED_USER_OPENIDS` | 空 | 逗号分隔 QQ `user_openid` allowlist |
 | `QQ_APP_ID` | 空 | QQ Bot App ID |

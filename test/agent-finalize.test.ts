@@ -31,6 +31,11 @@ describe("empty agent response finalization", () => {
         state: "output-available",
         output: { scheduled: true, sessionCount: 2 },
       }],
+      verifiedEffects: [{
+        toolName: "work_session_manage",
+        success: true,
+        outcome: { scheduled: true, committed: true },
+      }],
     }, fetcher)).resolves.toBe("已经拆成两段不冲突的工作时间，并保留了截止日期。");
 
     const requestBody = requestBodies[0]!;
