@@ -2,6 +2,7 @@ import { formatInTimeZone } from "date-fns-tz";
 import { getConfig, isAIEnabled } from "../config";
 import { OpenAICompatibleProvider } from "../ai/openai-compatible";
 import { DAILY_PLAN_PROMPT } from "../ai/prompts";
+import { presentTurnReply } from "../agent/attention";
 import { getChannelAdapter } from "../channels/registry";
 import { loadCalendarSnapshot } from "../db/calendar";
 import { claimDailyPlanRun, failDailyPlanRun, finishDailyPlanRun } from "../db/daily-plan-runs";
@@ -52,38 +53,42 @@ export async function buildDailyPlan(
 
   try {
     const provider = new OpenAICompatibleProvider(env.DB, config, env.AI_API_KEY, fetcher, () => now);
+    const planningContext = {
+      date: localDate(now, timezone),
+      currentLocalTime: localTime(now, timezone),
+      timezone,
+      profile: profile ? dailyPlanProfileContext(profile) : null,
+      calendar,
+      items: items.map((item) => {
+        const enrichment = summarizeItemEnrichment(item.aiEnrichment);
+        return {
+          id: item.id,
+          type: item.type,
+          title: item.title,
+          content: item.content,
+          status: item.status,
+          priority: item.priority,
+          estimated_duration: item.estimatedDuration,
+          due_at: item.dueAt,
+          start_after: item.startAfter,
+          ...(enrichment ? { enrichment } : {}),
+        };
+      }),
+    };
     const response = await provider.generate({
       purpose: "daily_plan",
       messages: [
         { role: "system", content: DAILY_PLAN_PROMPT },
-        {
-          role: "user",
-          content: JSON.stringify({
-            date: localDate(now, timezone),
-            currentLocalTime: localTime(now, timezone),
-            timezone,
-            profile: profile ? dailyPlanProfileContext(profile) : null,
-            calendar,
-            items: items.map((item) => {
-              const enrichment = summarizeItemEnrichment(item.aiEnrichment);
-              return {
-                id: item.id,
-                type: item.type,
-                title: item.title,
-                content: item.content,
-                status: item.status,
-                priority: item.priority,
-                estimated_duration: item.estimatedDuration,
-                due_at: item.dueAt,
-                start_after: item.startAfter,
-                ...(enrichment ? { enrichment } : {}),
-              };
-            }),
-          }),
-        },
+        { role: "user", content: JSON.stringify(planningContext) },
       ],
     });
-    return response.text;
+    return await presentTurnReply(env, {
+      channel: target?.channel ?? "qq",
+      originalText: "这是 Desk-IX 主动生成的今日安排。只呈现今天真正值得我关注、行动或决定的内容。",
+      backstageDraft: response.text,
+      completedTurnParts: [{ type: "daily_plan_context", ...planningContext }],
+      profile,
+    }, fetcher);
   } catch (error) {
     log("warn", "daily_plan_ai_fallback", { error: error instanceof Error ? error.message : String(error) });
     return annotateFallback(fallback);
@@ -159,13 +164,11 @@ function deterministicPlan(items: Item[], now: Date, timezone: string, userCallN
   const weekEnd = localDayBounds(now, timezone, 7).start;
   const must: Item[] = [];
   const should: Item[] = [];
-  const ifTime: Item[] = [];
 
   for (const item of items) {
     if (item.priority === "urgent" || item.priority === "high" || (item.dueAt && item.dueAt < today.end)) must.push(item);
     else if (item.dueAt && item.dueAt <= weekEnd) should.push(item);
-    else if (item.priority === "low" || item.type === "idea" || item.type === "resource") ifTime.push(item);
-    else should.push(item);
+    else if (item.priority !== "low" && item.type !== "idea" && item.type !== "resource") should.push(item);
   }
 
   const date = formatInTimeZone(now, timezone, "M/d");
@@ -174,7 +177,7 @@ function deterministicPlan(items: Item[], now: Date, timezone: string, userCallN
   const lines = [heading];
   appendSection(lines, "Must", must);
   appendSection(lines, "Should", should);
-  appendSection(lines, "If time", ifTime);
+  if (lines.length === 1) lines.push("", "今天没有需要主动打断你的事项。");
   return lines.join("\n");
 }
 

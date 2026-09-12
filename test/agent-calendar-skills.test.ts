@@ -30,6 +30,8 @@ describe("calendar skill catalog", () => {
     expect(review?.body).toContain("发生确定性");
     expect(review?.body).toContain("结果确定性");
     expect(review?.body).toContain("可靠唤醒 Agent");
+    expect(review?.body).toContain("工作段结束和正式截止是两个独立检查点");
+    expect(review?.body).toContain("截止已到也不等于已经提交或交付");
     expect(review?.body).toContain("不预先决定“已经完成”");
     expect(review?.body).toContain("不能把上述判断改写成事项类别、标题关键词或固定置信度表");
     expect(plan?.body).toContain("不建立统一提前量或固定周期");

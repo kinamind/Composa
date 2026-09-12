@@ -18,7 +18,7 @@ describe("daily planning", () => {
     expect(shouldRunDailyPlan(new Date("2026-08-15T12:00:00.000Z"), "America/New_York", "08:00")).toBe(true);
   });
 
-  it("builds a concise plan from real D1 items without AI", async () => {
+  it("keeps low-attention background out of the degraded plan when AI is unavailable", async () => {
     await createItem(env.DB, {
       type: "task",
       title: "今天提交报告",
@@ -43,7 +43,7 @@ describe("daily planning", () => {
     const plan = await buildDailyPlan(env, now);
     expect(plan).toContain("8/15 今日安排");
     expect(plan).toContain("Must\n• 今天提交报告");
-    expect(plan).toContain("If time\n• 整理研究想法");
+    expect(plan).not.toContain("整理研究想法");
     expect(plan.split("\n").length).toBeLessThanOrEqual(12);
   });
 
@@ -131,7 +131,7 @@ describe("daily planning", () => {
     await expect(claimDailyPlanRun(env.DB, "2026-08-15", "telegram", "42", now)).resolves.toBe(true);
   });
 
-  it("does not slice a complete model-generated daily plan", async () => {
+  it("keeps complete context backstage but exposes only the attention-selected daily plan", async () => {
     const userId = "long-ai-plan";
     const longItemContent = `${"背景".repeat(300)}末尾关键限制：必须避开组会。`;
     await createItem(env.DB, {
@@ -144,12 +144,22 @@ describe("daily planning", () => {
       sourceMessageId: "long-ai-plan-item",
     }, now);
     const longPlan = "安排".repeat(1_500);
-    let requestBody = "";
+    const requestBodies: string[] = [];
     const fetcher: typeof fetch = async (_input, init) => {
-      requestBody = typeof init?.body === "string" ? init.body : "";
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      const content = requestBodies.length === 1
+        ? longPlan
+        : requestBodies.length === 2
+          ? JSON.stringify({
+              mode: "plan",
+              summary: null,
+              entries: [{ subject: "复杂的一天", guidance: "避开组会时段完成今天的关键推进" }],
+              question: null,
+            })
+          : "**复杂的一天**：避开组会时段完成今天的关键推进。";
       return Response.json({
         model: "test-model",
-        choices: [{ message: { content: longPlan } }],
+        choices: [{ message: { content } }],
       });
     };
     const aiEnv = {
@@ -160,9 +170,11 @@ describe("daily planning", () => {
     } as unknown as Env;
 
     const plan = await buildDailyPlan(aiEnv, now, fetcher, { channel: "qq", userId });
-    expect(requestBody).toContain("末尾关键限制：必须避开组会");
-    expect(plan).toBe(longPlan);
-    expect(plan.length).toBe(3_000);
+    expect(requestBodies[0]).toContain("末尾关键限制：必须避开组会");
+    expect(requestBodies[1]).toContain(longPlan);
+    expect(plan).toBe("**复杂的一天**：避开组会时段完成今天的关键推进。");
+    expect(plan).not.toContain(longPlan);
+    expect(requestBodies).toHaveLength(3);
   });
 
   it("gives the daily planner canonical events, deadlines, work sessions, reminders, and conflicts", async () => {
@@ -203,12 +215,22 @@ describe("daily planning", () => {
       targetChannel: "qq",
       targetUserId: userId,
     }, now);
-    let requestBody = "";
+    const requestBodies: string[] = [];
     const fetcher: typeof fetch = async (_input, init) => {
-      requestBody = typeof init?.body === "string" ? init.body : "";
+      requestBodies.push(typeof init?.body === "string" ? init.body : "");
+      const content = requestBodies.length === 1
+        ? "已按真实日程整理"
+        : requestBodies.length === 2
+          ? JSON.stringify({
+              mode: "plan",
+              summary: "今天按真实日程推进。",
+              entries: [],
+              question: null,
+            })
+          : "今天按真实日程推进。";
       return Response.json({
         model: "test-model",
-        choices: [{ message: { content: "已按真实日程整理" } }],
+        choices: [{ message: { content } }],
       });
     };
     const aiEnv = {
@@ -222,7 +244,7 @@ describe("daily planning", () => {
 
     const request = z.object({
       messages: z.array(z.object({ role: z.string(), content: z.string() })),
-    }).parse(JSON.parse(requestBody) as unknown);
+    }).parse(JSON.parse(requestBodies[0] ?? "null") as unknown);
     const context = z.object({
       calendar: z.object({
         entries: z.array(z.object({

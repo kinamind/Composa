@@ -12,6 +12,7 @@ import {
 } from "../src/agent/followups";
 import {
   manageOwnedLifecycleFollowup,
+  synchronizeLifecycleReview,
   transitionOwnedItem,
 } from "../src/agent/tools/write";
 import { createItem } from "../src/db/items";
@@ -44,9 +45,10 @@ describe("agent-owned lifecycle follow-ups", () => {
     expect(review?.payload.reviewAt).toBe("2026-09-07T14:00:00.000Z");
     expect(review?.payload.reason).toContain("预设结果");
     expect(review?.payload.kind).toBe("boundary");
+    expect(review?.payload.lane).toBe("event_end");
   });
 
-  it("does not invent an end boundary for notes, deadlines, or duration-less events", async () => {
+  it("reviews explicit deadlines, including legacy due items, without inventing event endings", async () => {
     const note = await createItem(env.DB, {
       type: "note",
       title: "研究资料",
@@ -58,12 +60,21 @@ describe("agent-owned lifecycle follow-ups", () => {
       sourceMessageId: "no-derived-note-review",
     });
     expect(deriveItemLifecycleReview(note)).toBeNull();
-    expect(deriveItemLifecycleReview({
+    const deadline = deriveItemLifecycleReview({
       ...note,
       temporalRole: "deadline",
       dueAt: "2026-09-07T14:00:00.000Z",
       estimatedDuration: 60,
-    })).toBeNull();
+    });
+    expect(deadline?.basis).toBe("deadline");
+    expect(deadline?.payload.reviewAt).toBe("2026-09-07T14:00:00.000Z");
+    expect(deadline?.payload.reason).toContain("等同于已经完成");
+    expect(deadline?.payload.lane).toBe("deadline");
+    expect(deriveItemLifecycleReview({
+      ...note,
+      temporalRole: "none",
+      dueAt: "2026-09-07T14:00:00.000Z",
+    })?.basis).toBe("deadline");
     expect(deriveItemLifecycleReview({
       ...note,
       temporalRole: "event",
@@ -93,6 +104,38 @@ describe("agent-owned lifecycle follow-ups", () => {
     expect(review?.payload.reviewAt).toBe("2026-09-08T11:30:00.000Z");
     expect(review?.payload.reason).toContain("不预设结果");
     expect(review?.payload.kind).toBe("boundary");
+    expect(review?.payload.lane).toBe("work_plan_end");
+  });
+
+  it("keeps a work-plan review and a later deadline review as independent schedules", async () => {
+    const workEndsAt = new Date(Date.now() + 60 * 60_000).toISOString();
+    const deadlineAt = new Date(Date.now() + 3 * 60 * 60_000).toISOString();
+    const item = await createItem(env.DB, {
+      type: "task",
+      title: "提交论文",
+      content: "先结束修改，之后仍需确认投稿结果",
+      rawMessage: "今天截止",
+      dueAt: deadlineAt,
+      temporalRole: "none",
+      sourceChannel: principal.channel,
+      sourceUserId: principal.userId,
+      sourceMessageId: "independent-lifecycle-boundaries",
+    });
+    const set = vi.fn<LifecycleFollowupController["set"]>().mockImplementation(async (payload) => ({
+      scheduled: true,
+      scheduleId: `schedule-${payload.lane}`,
+      reviewAt: payload.reviewAt,
+    }));
+    const cancel = vi.fn<LifecycleFollowupController["cancel"]>().mockResolvedValue({ canceled: 1 });
+
+    const result = await synchronizeLifecycleReview(item, { set, cancel }, [
+      { endAt: workEndsAt, status: "planned" },
+    ]);
+
+    expect(cancel).toHaveBeenCalledWith(item.id, "boundary");
+    expect(set.mock.calls.map(([payload]) => payload.lane)).toEqual(["deadline", "work_plan_end"]);
+    expect(result).toMatchObject({ scheduled: true, reviewAt: deadlineAt, basis: "deadline" });
+    expect(result.reviews).toHaveLength(2);
   });
 
   it("matches only the exact callback and item payload", () => {
@@ -112,14 +155,19 @@ describe("agent-owned lifecycle follow-ups", () => {
       time: 1_787_000_000,
     } satisfies Schedule<unknown>;
     expect(isLifecycleFollowupSchedule(matching, itemId)).toBe(true);
+    expect(isLifecycleFollowupSchedule(matching, itemId, "boundary")).toBe(true);
+    expect(isLifecycleFollowupSchedule(matching, itemId, "progress")).toBe(false);
     expect(isLifecycleFollowupSchedule(matching, otherItemId)).toBe(false);
     expect(isLifecycleFollowupSchedule({ ...matching, callback: "anotherCallback" }, itemId)).toBe(false);
     expect(isLifecycleFollowupSchedule({ ...matching, payload: "not-an-object" }, itemId)).toBe(false);
     const boundary = { ...matching, payload: { ...matching.payload, kind: "boundary" as const } } satisfies Schedule<unknown>;
     const progress = { ...matching, payload: { ...matching.payload, kind: "progress" as const } } satisfies Schedule<unknown>;
+    const deadline = { ...matching, payload: { ...matching.payload, kind: "boundary" as const, lane: "deadline" as const } } satisfies Schedule<unknown>;
     expect(isLifecycleFollowupSchedule(boundary, itemId, "boundary")).toBe(true);
     expect(isLifecycleFollowupSchedule(boundary, itemId, "progress")).toBe(false);
     expect(isLifecycleFollowupSchedule(progress, itemId, "progress")).toBe(true);
+    expect(isLifecycleFollowupSchedule(deadline, itemId, "boundary", "deadline")).toBe(true);
+    expect(isLifecycleFollowupSchedule(deadline, itemId, "boundary", "work_plan_end")).toBe(false);
     expect(lifecycleReviewEventId(boundary.payload)).not.toBe(lifecycleReviewEventId(progress.payload));
   });
 
@@ -216,6 +264,7 @@ describe("agent-owned lifecycle follow-ups", () => {
       reviewAt,
       reason: "到点后结合上下文判断是否结束",
       kind: "progress",
+      lane: "progress",
     });
 
     await manageOwnedLifecycleFollowup(env, principal, {

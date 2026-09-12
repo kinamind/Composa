@@ -9,7 +9,7 @@ import {
 } from "../db/lifecycle-maintenance";
 import { log } from "../observability/log";
 
-const LIFECYCLE_BOUNDARY_BACKFILL = "future-boundaries-after-automatic-lifecycle-v1";
+const LIFECYCLE_BOUNDARY_BACKFILL = "future-deadlines-and-independent-boundaries-v2";
 
 interface LifecycleBackfillCandidate {
   id: string;
@@ -36,9 +36,14 @@ export async function runLifecycleBoundaryBackfill(env: Env, now = new Date()): 
           AND i.estimated_duration IS NOT NULL
           AND julianday(i.due_at) + (i.estimated_duration / 1440.0) > julianday(?)
         )
+        OR (
+          i.temporal_role != 'event'
+          AND i.due_at IS NOT NULL
+          AND julianday(i.due_at) > julianday(?)
+        )
         OR (w.end_at IS NOT NULL AND julianday(w.end_at) > julianday(?))
       )
-    `).bind(now.toISOString(), now.toISOString()).all<LifecycleBackfillCandidate>();
+    `).bind(now.toISOString(), now.toISOString(), now.toISOString()).all<LifecycleBackfillCandidate>();
 
     let synchronized = 0;
     for (const candidate of candidates.results) {

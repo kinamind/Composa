@@ -86,6 +86,48 @@ describe("URL safety and extraction", () => {
     expect(reading.text).not.toContain("xxxxx");
   });
 
+  it("normalizes malformed UTF-8 before streaming HTML into HTMLRewriter", async () => {
+    const bytes = concatBytes(
+      new TextEncoder().encode("<html><head><title>可读文章</title></head><body><article>正文前"),
+      new Uint8Array([0x80]),
+      new TextEncoder().encode("正文后</article></body></html>"),
+    );
+    const fetcher: typeof fetch = async () => new Response(bytes, {
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+
+    const reading = await readWebPage("https://mp.weixin.qq.com/s/malformed-byte", {
+      urlFetchTimeoutMs: 1_000,
+      urlMaxTextBytes: 20_000,
+    }, fetcher);
+
+    expect(reading.title).toBe("可读文章");
+    expect(reading.text).toContain("正文前");
+    expect(reading.text).toContain("正文后");
+  });
+
+  it("decodes a declared legacy CJK charset before HTML extraction", async () => {
+    const chinese = new Uint8Array([0xd6, 0xd0, 0xce, 0xc4]);
+    const bytes = concatBytes(
+      new TextEncoder().encode("<html><head><title>"),
+      chinese,
+      new TextEncoder().encode("</title></head><body><article>"),
+      chinese,
+      new TextEncoder().encode("</article></body></html>"),
+    );
+    const fetcher: typeof fetch = async () => new Response(bytes, {
+      headers: { "content-type": "text/html; charset=gb2312" },
+    });
+
+    const reading = await readWebPage("https://example.com/legacy-cjk", {
+      urlFetchTimeoutMs: 1_000,
+      urlMaxTextBytes: 20_000,
+    }, fetcher);
+
+    expect(reading.title).toBe("中文");
+    expect(reading.text).toContain("中文");
+  });
+
   it("bounds actual visible text rather than raw markup", async () => {
     const visibleText = `正文${"内容".repeat(2_000)}`;
     const fetcher: typeof fetch = async () => new Response(visibleText, {
@@ -138,3 +180,13 @@ describe("URL safety and extraction", () => {
     expect(reading.text).not.toContain("原文写作 & FAQ");
   });
 });
+
+function concatBytes(...parts: Uint8Array<ArrayBufferLike>[]): Uint8Array<ArrayBuffer> {
+  const output = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+  return output;
+}

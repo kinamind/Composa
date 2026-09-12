@@ -85,6 +85,8 @@ describe("attention-aware foreground presentation", () => {
     expect(directorMessages[0]?.content).toContain("一个会改变下一步安排的轻量问题");
     expect(directorMessages[0]?.content).toContain("联系方式");
     expect(directorMessages[0]?.content).toContain("延后不等于值得展示");
+    expect(directorMessages[0]?.content).toContain("X 今天不做");
+    expect(directorMessages[0]?.content).toContain("否定句重新列出未选事项");
     expect(directorMessages[0]?.content).toContain("不要在用户已经过载时集中抛给用户确认");
     expect(directorMessages[0]?.content).toContain("planningDensity");
     expect(directorMessages[0]?.content).toContain("总揽是带助理判断的可下钻索引");
@@ -127,6 +129,7 @@ describe("attention-aware foreground presentation", () => {
     expect(ATTENTION_DIRECTOR_SYSTEM_PROMPT).not.toMatch(/最多\s*[一二三四五六七八九十\d]+\s*[项条]/);
     expect(ATTENTION_RENDERER_SYSTEM_PROMPT).toContain("不增加简报中不存在的事项");
     expect(ATTENTION_RENDERER_SYSTEM_PROMPT).toContain("不得出现防御、辩解");
+    expect(ATTENTION_RENDERER_SYSTEM_PROMPT).toContain("不挤占今天");
   });
 
   it("falls back to the selected brief when expression fails without reopening backstage", async () => {

@@ -44,12 +44,16 @@ export async function fetchPage(
       }
       if (!response.ok) throw new UrlFetchError(`Upstream returned HTTP ${response.status}`);
 
-      const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+      const contentTypeHeader = response.headers.get("content-type");
+      const contentType = contentTypeHeader?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
       if (contentType !== "text/html" && contentType !== "text/plain" && contentType !== "application/xhtml+xml") {
         throw new UrlFetchError(`Unsupported content type: ${contentType || "unknown"}`);
       }
       if (contentType === "text/plain") {
-        const { text, truncated } = await readLimitedText(response.body, options.maxTextBytes);
+        const { text, truncated } = await readLimitedText(
+          normalizeTextStream(response.body, contentTypeHeader),
+          options.maxTextBytes,
+        );
         return {
           url: current.toString(),
           contentType,
@@ -62,13 +66,60 @@ export async function fetchPage(
           truncated,
         };
       }
-      const extracted = await extractPageMetadataFromResponse(response, current.toString(), options.maxTextBytes);
+      const extracted = await extractPageMetadataFromResponse(
+        normalizeHtmlResponse(response, contentTypeHeader),
+        current.toString(),
+        options.maxTextBytes,
+      );
       return { url: current.toString(), contentType, ...extracted };
     } finally {
       clearTimeout(timeout);
     }
   }
   throw new UrlFetchError("URL fetch did not produce a response");
+}
+
+function normalizeHtmlResponse(response: Response, contentType: string | null): Response {
+  const headers = new Headers(response.headers);
+  headers.set("content-type", "text/html; charset=utf-8");
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  return new Response(normalizeTextStream(response.body, contentType), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function normalizeTextStream(
+  body: ReadableStream<Uint8Array> | null,
+  contentType: string | null,
+): ReadableStream<Uint8Array> | null {
+  if (!body) return null;
+  const decoder = createPageDecoder(contentType);
+  const encoder = new TextEncoder();
+  return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      const decoded = decoder.decode(chunk, { stream: true });
+      if (decoded) controller.enqueue(encoder.encode(decoded));
+    },
+    flush(controller) {
+      const decoded = decoder.decode();
+      if (decoded) controller.enqueue(encoder.encode(decoded));
+    },
+  }));
+}
+
+function createPageDecoder(contentType: string | null): TextDecoder {
+  const declared = contentType?.match(/charset\s*=\s*["']?([^;\s"']+)/i)?.[1];
+  if (declared) {
+    try {
+      return new TextDecoder(declared, { fatal: false });
+    } catch {
+      // Unknown labels are treated as UTF-8; malformed bytes are replaced below.
+    }
+  }
+  return new TextDecoder("utf-8", { fatal: false });
 }
 
 async function readLimitedText(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
