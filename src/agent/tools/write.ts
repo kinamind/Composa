@@ -180,15 +180,25 @@ export async function synchronizeLifecycleReview(
   ].filter((candidate): candidate is DerivedLifecycleReview => (
     candidate !== null && Date.parse(candidate.payload.reviewAt) > now
   ));
-  const selected = candidates.reduce<DerivedLifecycleReview | null>((latest, candidate) => (
-    !latest || Date.parse(candidate.payload.reviewAt) > Date.parse(latest.payload.reviewAt) ? candidate : latest
-  ), null);
-  if (!selected) {
-    const result = await followups.cancel(item.id, "boundary");
-    return { scheduled: false as const, canceled: result.canceled };
+  const { canceled } = await followups.cancel(item.id, "boundary");
+  if (candidates.length === 0) return { scheduled: false as const, canceled };
+
+  const reviews = [];
+  for (const candidate of candidates) {
+    const scheduled = await followups.set(candidate.payload);
+    reviews.push({ ...scheduled, basis: candidate.basis, lane: candidate.payload.lane });
   }
-  const result = await followups.set(selected.payload);
-  return { ...result, basis: selected.basis };
+  const latest = reviews.reduce((selected, review) => (
+    Date.parse(review.reviewAt) > Date.parse(selected.reviewAt) ? review : selected
+  ));
+  return {
+    scheduled: true as const,
+    canceled,
+    scheduleId: latest.scheduleId,
+    reviewAt: latest.reviewAt,
+    basis: latest.basis,
+    reviews,
+  };
 }
 
 export async function createOwnedItem(
@@ -200,9 +210,11 @@ export async function createOwnedItem(
   const existing = await getItemBySource(env.DB, principal.channel, principal.eventId, input.actionIndex);
   if (existing) {
     if (existing.sourceUserId !== principal.userId) throw new Error("Source event is already owned by another user");
-    const review = deriveItemLifecycleReview(existing);
-    const lifecycleReview = followups && review && Date.parse(review.payload.reviewAt) > Date.now()
-      ? { ...(await followups.set(review.payload)), basis: review.basis }
+    const sessions = followups
+      ? await listOwnedWorkSessions(env.DB, existing.id, principal.channel, principal.userId)
+      : [];
+    const lifecycleReview = followups
+      ? await synchronizeLifecycleReview(existing, followups, sessions)
       : null;
     return {
       created: false,
@@ -233,9 +245,8 @@ export async function createOwnedItem(
     aiEnrichment: input.structuredData ?? {},
     metadata: { agentRuntime: "composa-v2" },
   });
-  const review = deriveItemLifecycleReview(item);
-  const lifecycleReview = followups && review && Date.parse(review.payload.reviewAt) > Date.now()
-    ? { ...(await followups.set(review.payload)), basis: review.basis }
+  const lifecycleReview = followups
+    ? await synchronizeLifecycleReview(item, followups, [])
     : null;
   return {
     created: true,
@@ -575,6 +586,7 @@ export async function manageOwnedLifecycleFollowup(
     reviewAt: reviewAt.toISOString(),
     reason: input.reason,
     kind: "progress",
+    lane: "progress",
   });
 }
 
@@ -656,7 +668,7 @@ export function createWriteActions(
       execute: (input) => replanOwnedWorkSessions(env, principal(), input, followups),
     }),
     lifecycle_followup_manage: action({
-      description: "Set or cancel an Agent-owned progress review for an existing item when current judgment calls for a checkpoint. Boundary reviews for bounded events and saved work plans are maintained independently and will not be replaced by this action. Use progress reviews for non-fixed work, pre-deadline synchronization, unresolved outcomes, or another contextually meaningful check; choose the time from actual risk, effort, progress, calendar, and user preferences rather than a fixed interval. At review time the Agent will judge whether to update, ask one useful question, adjust plans, complete, create follow-on work, or schedule the next progress review. Use an item-specific reason, not a category rule.",
+      description: "Set or cancel an Agent-owned progress review for an existing item when current judgment calls for a checkpoint. Boundary reviews for bounded events, explicit deadlines, and saved work plans are maintained independently and will not be replaced by this action. Use progress reviews for non-fixed work, pre-deadline synchronization, unresolved outcomes, or another contextually meaningful check; choose the time from actual risk, effort, progress, calendar, and user preferences rather than a fixed interval. At review time the Agent will judge whether to update, ask one useful question, adjust plans, complete, create follow-on work, or schedule the next progress review. Use an item-specific reason, not a category rule.",
       inputSchema: lifecycleFollowupInputSchema,
       permissions: ["followups:write"],
       idempotencyKey: ({ input }) => `followup:${principal().eventId}:${input.itemId}:${stableFingerprint(input)}`,

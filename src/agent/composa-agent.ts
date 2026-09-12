@@ -42,6 +42,8 @@ import {
   lifecycleFollowupPayloadSchema,
   lifecycleReviewEventId,
   type LifecycleFollowupController,
+  type LifecycleFollowupKind,
+  type LifecycleFollowupLane,
   type LifecycleFollowupPayload,
 } from "./followups";
 import { buildProfileContext, buildSystemPrompt } from "./prompt";
@@ -172,7 +174,7 @@ export class ComposaAgent extends Think<Env> {
       ? `\n当前有一个待完成的交互：用户刚才要求为事项「${pendingItem.title}」（itemId: ${pendingItem.id}）${pending.action === "reschedule" ? "修改提醒时间" : pending.action}。把本轮自然语言优先理解为对这项交互的回答；必要时先查日程，再调用 reminder_manage。`
       : "";
     const lifecycleReviewContext = isLifecycleReview
-      ? "\n本轮是系统触发的生命周期检查，可能来自已保存日程的结束边界，也可能是你此前自主选择的进度同步点；它不是用户刚发来的事实陈述，也不预先代表结果已完成。以内部事件正文标明的类型为准，加载指定事项与必要上下文后判断更新、完成、询问、调整计划、创建后续或再次同步。用户可见内容保持轻量，不展开内部复盘。"
+      ? "\n本轮是系统触发的生命周期检查，可能来自已保存日程的结束边界、明确截止，也可能是你此前自主选择的进度同步点；它不是用户刚发来的事实陈述，也不预先代表结果已完成。以内部事件正文标明的类型为准，加载指定事项与必要上下文后判断更新、完成、询问、调整计划、创建后续或再次同步。用户可见内容保持轻量，不展开内部复盘。"
       : "";
     const currentMessage = await getMessageTextBySource(this.env.DB, principal.channel, principal.eventId) ?? "";
     const [planningContext, itemContext] = await Promise.all([
@@ -207,7 +209,8 @@ export class ComposaAgent extends Think<Env> {
         if (Number.isNaN(reviewAt.getTime()) || reviewAt.getTime() <= Date.now()) {
           throw new Error("Lifecycle review time must be in the future");
         }
-        await this.cancelLifecycleFollowups(payload.itemId, payload.kind);
+        const lane = payload.lane ?? (payload.kind === "progress" ? "progress" : undefined);
+        await this.cancelLifecycleFollowups(payload.itemId, payload.kind, lane);
         const schedule = await this.schedule(reviewAt, "reviewScheduledItem", payload, { idempotent: true });
         return { scheduled: true, scheduleId: schedule.id, reviewAt: payload.reviewAt };
       },
@@ -217,11 +220,12 @@ export class ComposaAgent extends Think<Env> {
 
   private async cancelLifecycleFollowups(
     itemId: string,
-    kind?: "boundary" | "progress",
+    kind?: LifecycleFollowupKind,
+    lane?: LifecycleFollowupLane,
   ): Promise<number> {
     const schedules = await this.listSchedules({ type: "scheduled" });
     const matches = schedules.filter((schedule: Schedule<unknown>) => (
-      isLifecycleFollowupSchedule(schedule, itemId, kind)
+      isLifecycleFollowupSchedule(schedule, itemId, kind, lane)
     ));
     const results = await Promise.all(matches.map((schedule) => this.cancelSchedule(schedule.id)));
     return results.filter(Boolean).length;

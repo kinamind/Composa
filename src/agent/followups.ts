@@ -5,19 +5,25 @@ import type { Item, WorkSession } from "../core/types";
 export const LIFECYCLE_FOLLOWUP_CALLBACK = "reviewScheduledItem";
 export const LIFECYCLE_REVIEW_EVENT_PREFIX = "lifecycle-review";
 
+export const lifecycleFollowupKinds = ["boundary", "progress"] as const;
+export const lifecycleFollowupLanes = ["event_end", "deadline", "work_plan_end", "progress"] as const;
+export type LifecycleFollowupKind = typeof lifecycleFollowupKinds[number];
+export type LifecycleFollowupLane = typeof lifecycleFollowupLanes[number];
+
 export const lifecycleFollowupPayloadSchema = z.object({
   itemId: z.string().uuid(),
   channel: z.enum(["telegram", "qq"]),
   userId: z.string().min(1).max(256),
   reviewAt: z.string().datetime(),
   reason: z.string().trim().min(1).max(1_000),
-  kind: z.enum(["boundary", "progress"]).optional(),
+  kind: z.enum(lifecycleFollowupKinds).optional(),
+  lane: z.enum(lifecycleFollowupLanes).optional(),
 });
 
 export type LifecycleFollowupPayload = z.infer<typeof lifecycleFollowupPayloadSchema>;
 
 export interface DerivedLifecycleReview {
-  basis: "event_end" | "work_plan_end";
+  basis: Exclude<LifecycleFollowupLane, "progress">;
   payload: LifecycleFollowupPayload;
 }
 
@@ -27,41 +33,53 @@ export interface LifecycleFollowupController {
     scheduleId: string;
     reviewAt: string;
   }>;
-  cancel(itemId: string, kind?: "boundary" | "progress"): Promise<{ canceled: number }>;
+  cancel(itemId: string, kind?: LifecycleFollowupKind, lane?: LifecycleFollowupLane): Promise<{ canceled: number }>;
 }
 
 export function isLifecycleFollowupSchedule(
   schedule: Schedule<unknown>,
   itemId: string,
-  kind?: "boundary" | "progress",
+  kind?: LifecycleFollowupKind,
+  lane?: LifecycleFollowupLane,
 ): boolean {
   if (schedule.callback !== LIFECYCLE_FOLLOWUP_CALLBACK) return false;
   const payload = lifecycleFollowupPayloadSchema.safeParse(schedule.payload);
   if (!payload.success || payload.data.itemId !== itemId) return false;
-  if (!kind) return true;
-  return payload.data.kind === kind || payload.data.kind === undefined;
+  const resolvedKind = payload.data.kind ?? "boundary";
+  if (kind && resolvedKind !== kind) return false;
+  if (!lane) return true;
+  const resolvedLane = payload.data.lane
+    ?? (payload.data.kind === "progress" ? "progress" : null);
+  return resolvedLane === lane;
 }
 
 export function lifecycleReviewEventId(payload: LifecycleFollowupPayload): string {
-  return `${LIFECYCLE_REVIEW_EVENT_PREFIX}:${payload.itemId}:${payload.kind ?? "legacy"}:${Date.parse(payload.reviewAt)}`;
+  return `${LIFECYCLE_REVIEW_EVENT_PREFIX}:${payload.itemId}:${payload.lane ?? payload.kind ?? "legacy"}:${Date.parse(payload.reviewAt)}`;
 }
 
 export function deriveItemLifecycleReview(item: Item): DerivedLifecycleReview | null {
   if (item.status === "completed" || item.status === "archived") return null;
-  if (item.temporalRole !== "event" || !item.dueAt || !item.estimatedDuration) return null;
-  const startsAt = Date.parse(item.dueAt);
-  if (!Number.isFinite(startsAt)) return null;
-  const reviewAt = new Date(startsAt + item.estimatedDuration * 60_000);
+  if (!item.dueAt) return null;
+  const dueAt = Date.parse(item.dueAt);
+  if (!Number.isFinite(dueAt)) return null;
+  if (item.temporalRole === "event" && !item.estimatedDuration) return null;
+  const basis = item.temporalRole === "event" ? "event_end" : "deadline";
+  const reviewAt = new Date(
+    basis === "event_end" ? dueAt + item.estimatedDuration! * 60_000 : dueAt,
+  );
   if (Number.isNaN(reviewAt.getTime())) return null;
   return {
-    basis: "event_end",
+    basis,
     payload: {
       itemId: item.id,
       channel: item.sourceChannel,
       userId: item.sourceUserId,
       reviewAt: reviewAt.toISOString(),
-      reason: `事项保存的固定时段已到预计结束点（开始 ${item.dueAt}，持续 ${item.estimatedDuration} 分钟）；请结合当前上下文判断其生命周期，而不是预设结果。`,
+      reason: basis === "event_end"
+        ? `事项保存的固定时段已到预计结束点（开始 ${item.dueAt}，持续 ${item.estimatedDuration} 分钟）；请结合当前上下文判断其生命周期，而不是预设结果。`
+        : `事项保存的明确截止边界已到（${item.dueAt}）；请结合当前上下文核对结果与后续安排，不要把截止已到等同于已经完成。`,
       kind: "boundary",
+      lane: basis,
     },
   };
 }
@@ -87,6 +105,7 @@ export function deriveWorkSessionLifecycleReview(
       reviewAt,
       reason: `为该事项保存的工作计划已到最后一个时段的结束点（${reviewAt}）；请结合实际进展判断完成、继续安排或轻量确认，不预设结果。`,
       kind: "boundary",
+      lane: "work_plan_end",
     },
   };
 }
@@ -96,7 +115,10 @@ export function buildLifecycleReviewMessage(
   payload: LifecycleFollowupPayload,
   now = new Date(),
 ): string {
-  const isBoundaryReview = payload.kind === "boundary";
+  const isBoundaryReview = (payload.kind ?? "boundary") === "boundary";
+  const boundaryGuidance = payload.lane === "deadline"
+    ? "系统已经可靠确认的是明确截止边界已到，不是提交、交付或完成结果。先激活 calendar-review 技能并用 item_get；需要时间上下文时，用 calendar_snapshot。结合最新对话、已有执行和后续影响判断完成、舍弃、继续推进、调整计划或只问一个轻量问题。"
+    : "先激活 calendar-review 技能并用 item_get；需要时间上下文时，用 calendar_snapshot 查看覆盖该事项的明确范围。系统已经可靠确认的是安排的时间边界已到，不是事项结果。分别判断发生确定性与结果确定性，不得按“会议”“任务”等名称套固定规则。";
   const compactItem = {
     id: item.id,
     type: item.type,
@@ -118,7 +140,7 @@ export function buildLifecycleReviewMessage(
     `当初安排复盘的理由：${payload.reason}`,
     `目标事项：${JSON.stringify(compactItem)}`,
     isBoundaryReview
-      ? "先激活 calendar-review 技能并用 item_get；需要时间上下文时，用 calendar_snapshot 查看覆盖该事项的明确范围。系统已经可靠确认的是安排的时间边界已到，不是事项结果。分别判断发生确定性与结果确定性，不得按“会议”“任务”等名称套固定规则。"
+      ? boundaryGuidance
       : "先激活 calendar-review 技能并用 item_get；需要时间上下文时，用 calendar_snapshot 查看相关范围。这是 Agent 此前根据事项状态选择的进度检查点，不表示任何时间段已经发生，也不表示进度停滞。结合截止、已有投入、后续空档和最新上下文判断此刻是否需要推进、调整或询问。",
     isBoundaryReview
       ? "如果现有证据让你高度确信原事件已自然发生或结束，且原事项本身表示的就是这次发生而非某个尚未确认的产出，可以标记完成并用一句自然的话告知，允许用户纠正；不要展开复盘报告。"
