@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "composa",
+  "name": "desk-ix",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-15",
   "compatibility_flags": ["nodejs_compat"],
@@ -33,10 +33,10 @@
     "AI_TIMEOUT_MS": "180000",
     "AI_DAILY_PLAN_TIMEOUT_MS": "180000",
     "AI_DAILY_REQUEST_LIMIT": "0",
-    "URL_FETCH_TIMEOUT_MS": "6000",
+    "URL_FETCH_TIMEOUT_MS": "20000",
     "URL_MAX_TEXT_BYTES": "524288",
     "MEDIA_MAX_BYTES": "20000000",
-    "XHS_MAX_BYTES": "2000000",
+    "XHS_MAX_BYTES": "8000000",
     "QQ_API_BASE_URL": "https://api.bot.qq.com"
   },
   "d1_databases": [

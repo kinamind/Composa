@@ -22,6 +22,7 @@ export async function readXiaohongshuPost(
       authenticated: false,
       noteId: null,
       canonicalUrl: null,
+      reasonCode: "page_too_large",
       reason: "The Xiaohongshu page exceeded the configured size limit before its post data could be read.",
     };
   }
